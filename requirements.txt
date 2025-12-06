@@ -1,9 +1,6 @@
 streamlit
-numpy
+pandas
 networkx
 matplotlib
-pandas
-scipy
-ast
-io
+numpy
 openpyxl
