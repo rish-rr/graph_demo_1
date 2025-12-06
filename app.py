@@ -10,6 +10,7 @@ import io
 # --- Helper Functions ---
 
 def matrix_to_graph(M, kind="auto"):
+    """Converts a matrix M into a NetworkX graph."""
     M = np.array(M)
     M = np.nan_to_num(M) 
     n_rows, n_cols = M.shape
@@ -56,13 +57,13 @@ def matrix_to_graph(M, kind="auto"):
             for j in range(n_cols):
                 if M[i, j] != 0:
                     G.add_edge(U_nodes[i], V_nodes[j], weight=M[i, j])
-
     else:
         raise ValueError(f"Unknown kind: {kind}")
 
     return G, kind
 
 def load_matrix_smart(uploaded_file):
+    """Robustly loads a matrix from CSV/Excel, handling headers and indices."""
     uploaded_file.seek(0)
     file_type = uploaded_file.name.split('.')[-1].lower()
     
@@ -72,6 +73,7 @@ def load_matrix_smart(uploaded_file):
         else:
             return pd.read_excel(file, **kwargs)
 
+    # Strategy 1: Raw matrix (no headers)
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=None)
@@ -81,6 +83,7 @@ def load_matrix_smart(uploaded_file):
     except:
         pass
 
+    # Strategy 2: With Index Column (fixes your specific CSV issue)
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, index_col=0)
@@ -90,6 +93,7 @@ def load_matrix_smart(uploaded_file):
     except:
         pass
     
+    # Strategy 3: With Header, No Index
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=0)
@@ -117,7 +121,6 @@ kind_option = st.sidebar.selectbox("Matrix Type", options=["auto", "adjacency", 
 
 # --- Main Logic ---
 
-# Global Data Loader
 matrix_data = None
 try:
     if uploaded_file:
@@ -211,8 +214,12 @@ with tab2:
             G_ana = G_original
 
         # 2. Compute Condensed Graph (Cohorts)
-        # The nodes of C are the SCCs of G_ana
-        C = nx.condensations.condensation(G_ana)
+        # --- FIX: nx.condensations.condensation -> nx.condensation ---
+        try:
+            C = nx.condensation(G_ana) 
+        except Exception as e:
+            st.error(f"Error calculating cohorts: {e}")
+            st.stop()
         
         # Mapping: Node -> Cohort ID
         node_to_cohort = {}
@@ -224,32 +231,29 @@ with tab2:
         st.success(f"Detected {num_cohorts} Cohorts (Strongly Connected Components)")
 
         # 3. Create Topological Sorting of Cohorts (for Matrix ordering)
-        # In a condensation graph (DAG), we can sort topologically.
         try:
             cohort_order = list(nx.topological_sort(C))
         except:
-            cohort_order = list(C.nodes()) # Fallback if cycle (shouldn't happen in condensation)
+            cohort_order = list(C.nodes()) 
 
         # 4. Reorder Nodes for Matrix
         ordered_nodes = []
         cohort_boundaries = [0]
         
         for cid in cohort_order:
-            members = sorted(list(C.nodes[cid]['members'])) # Internal sort for neatness
+            members = sorted(list(C.nodes[cid]['members'])) 
             ordered_nodes.extend(members)
             cohort_boundaries.append(len(ordered_nodes))
 
         # 5. Build Permuted Matrix
-        # Map original node labels to 0..N indices for matrix construction
         node_to_idx = {n: i for i, n in enumerate(ordered_nodes)}
         N = len(ordered_nodes)
         P_matrix = np.zeros((N, N))
 
-        # Fill P_matrix based on edges in G_ana
         for u, v, data in G_ana.edges(data=True):
             if u in node_to_idx and v in node_to_idx:
                 i, j = node_to_idx[u], node_to_idx[v]
-                P_matrix[i, j] = 1 # Binary for visualization
+                P_matrix[i, j] = 1 
 
         # --- Visualization Layout ---
         col_f1, col_f2 = st.columns(2)
@@ -274,39 +278,33 @@ with tab2:
         with col_f2:
             st.subheader("2. Cohort Graph")
             
-            # Assign colors to cohorts using a colormap
             cmap = plt.get_cmap('tab20')
-            node_colors = []
             
-            # We need to iterate nodes in the order G_ana stores them to match nx.draw
+            # Safe Color Mapping: explicitly list nodes to ensure alignment
             draw_nodes = list(G_ana.nodes())
+            node_colors = []
             for n in draw_nodes:
                 cid = node_to_cohort.get(n, 0)
-                # Hash cid to get a color index
-                color = cmap(cid % 20)
-                node_colors.append(color)
+                node_colors.append(cmap(cid % 20))
 
             fig_g, ax_g = plt.subplots(figsize=(8, 8))
             
-            # Layout: Separate cohorts visually?
-            # A good trick is to use the Condensation layout for the centers, then spring around them
-            pos_super = nx.spring_layout(C, seed=42, k=2.0) # Layout of cohorts
+            # Hierarchical Layout Logic
+            pos_super = nx.spring_layout(C, seed=42, k=2.0) 
             pos_final = {}
             
-            # Position nodes around their cohort center
             for cid in C.nodes():
                 center = pos_super[cid]
                 members = C.nodes[cid]['members']
-                # Create sub-graph for internal layout
                 subG = G_ana.subgraph(members)
-                # Small spring layout centered at 'center'
                 sub_pos = nx.spring_layout(subG, center=center, scale=0.3)
                 pos_final.update(sub_pos)
 
-            nx.draw_networkx_nodes(G_ana, pos_final, node_size=100, node_color=node_colors, ax=ax_g)
+            # Draw with explicit nodelist to match colors
+            nx.draw_networkx_nodes(G_ana, pos_final, nodelist=draw_nodes, node_size=100, node_color=node_colors, ax=ax_g)
             nx.draw_networkx_edges(G_ana, pos_final, alpha=0.2, arrows=True, ax=ax_g)
             
-            # Legend for top 10 largest cohorts
+            # Legend
             legend_elements = []
             top_cohorts = sorted(C.nodes(data="members"), key=lambda x: len(x[1]), reverse=True)[:10]
             for i, (cid, members) in enumerate(top_cohorts):
@@ -318,7 +316,6 @@ with tab2:
             ax_g.axis('off')
             st.pyplot(fig_g)
             
-            # Download Logic for Cohort Graph
             buf_c = io.BytesIO()
             plt.savefig(buf_c, format='png', dpi=300, bbox_inches='tight')
             buf_c.seek(0)
