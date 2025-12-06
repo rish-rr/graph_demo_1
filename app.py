@@ -3,11 +3,20 @@ import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.colors as mcolors
 import ast
 import pandas as pd
 import io
+import scipy
 
-# --- Helper Functions ---
+# --- Helper: Check for Pydot (Graphviz Export) ---
+try:
+    from networkx.drawing.nx_pydot import write_dot
+    HAS_PYDOT = True
+except ImportError:
+    HAS_PYDOT = False
+
+# --- Core Functions ---
 
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
@@ -73,7 +82,7 @@ def load_matrix_smart(uploaded_file):
         else:
             return pd.read_excel(file, **kwargs)
 
-    # Strategy 1: Raw matrix (no headers)
+    # Strategy 1: Raw matrix
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=None)
@@ -83,7 +92,7 @@ def load_matrix_smart(uploaded_file):
     except:
         pass
 
-    # Strategy 2: With Index Column (fixes your specific CSV issue)
+    # Strategy 2: With Index
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, index_col=0)
@@ -93,7 +102,7 @@ def load_matrix_smart(uploaded_file):
     except:
         pass
     
-    # Strategy 3: With Header, No Index
+    # Strategy 3: Header, No Index
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=0)
@@ -136,7 +145,6 @@ if not matrix_data:
     st.info("Please upload a file or enter data to begin.")
     st.stop()
 
-# Build Graph
 try:
     G_original, detected_kind = matrix_to_graph(matrix_data, kind=kind_option)
 except Exception as e:
@@ -182,12 +190,27 @@ with tab1:
                 ax.axis('off')
                 st.pyplot(fig)
                 
-                # Download
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png', dpi=user_dpi, bbox_inches='tight')
-                buf.seek(0)
-                st.download_button("Download Image", buf, "graph.png", "image/png")
-                plt.close(fig)
+                # --- DOWNLOADS ---
+                c1, c2 = st.columns(2)
+                with c1:
+                    # PNG Download
+                    buf = io.BytesIO()
+                    plt.savefig(buf, format='png', dpi=user_dpi, bbox_inches='tight')
+                    buf.seek(0)
+                    st.download_button("📥 Download Image (PNG)", buf, "graph.png", "image/png")
+                    plt.close(fig)
+                
+                with c2:
+                    # DOT Download
+                    if HAS_PYDOT:
+                        dot_buf = io.StringIO()
+                        try:
+                            write_dot(G_original, dot_buf)
+                            st.download_button("📄 Download Graphviz (.gv)", dot_buf.getvalue(), "graph.gv", "text/plain")
+                        except Exception as dot_err:
+                            st.error(f"Export failed: {dot_err}")
+                    else:
+                        st.warning("Install 'pydot' to enable .gv export")
 
         with col_stats:
             st.write(f"**Nodes:** {num_nodes}")
@@ -200,28 +223,26 @@ with tab1:
 with tab2:
     st.markdown("""
     **Frobenius Normal Form Analysis:** Identifies **Cohorts** (Strongly Connected Components).  
-    1. **Matrix View:** Reorders the matrix to Block Triangular Form. Diagonal blocks are cohorts.  
+    1. **Matrix View:** Reorders the matrix to Block Triangular Form.
     2. **Graph View:** Colors nodes by cohort to show structure.
     """)
 
     if st.button("Analyze Cohorts", type="primary", key="btn_frob"):
         
-        # 1. Ensure Directed Graph for SCC analysis
+        # 1. Ensure Directed Graph
         if detected_kind == "biadjacency" or not G_original.is_directed():
             st.warning("Converting to Directed Graph for component analysis.")
             G_ana = G_original.to_directed()
         else:
-            G_ana = G_original
+            G_ana = G_original.copy() # Copy to avoid mutating original with colors
 
-        # 2. Compute Condensed Graph (Cohorts)
-        # --- FIX: nx.condensations.condensation -> nx.condensation ---
+        # 2. Compute Cohorts
         try:
             C = nx.condensation(G_ana) 
         except Exception as e:
             st.error(f"Error calculating cohorts: {e}")
             st.stop()
         
-        # Mapping: Node -> Cohort ID
         node_to_cohort = {}
         for cohort_id, nodes_in_cohort in C.nodes(data="members"):
             for node in nodes_in_cohort:
@@ -230,16 +251,15 @@ with tab2:
         num_cohorts = len(C.nodes())
         st.success(f"Detected {num_cohorts} Cohorts (Strongly Connected Components)")
 
-        # 3. Create Topological Sorting of Cohorts (for Matrix ordering)
+        # 3. Topological Sort for Matrix
         try:
             cohort_order = list(nx.topological_sort(C))
         except:
             cohort_order = list(C.nodes()) 
 
-        # 4. Reorder Nodes for Matrix
+        # 4. Reorder Nodes
         ordered_nodes = []
         cohort_boundaries = [0]
-        
         for cid in cohort_order:
             members = sorted(list(C.nodes[cid]['members'])) 
             ordered_nodes.extend(members)
@@ -249,50 +269,31 @@ with tab2:
         node_to_idx = {n: i for i, n in enumerate(ordered_nodes)}
         N = len(ordered_nodes)
         P_matrix = np.zeros((N, N))
-
         for u, v, data in G_ana.edges(data=True):
             if u in node_to_idx and v in node_to_idx:
                 i, j = node_to_idx[u], node_to_idx[v]
                 P_matrix[i, j] = 1 
 
-        # --- Visualization Layout ---
+        # --- Visualization ---
         col_f1, col_f2 = st.columns(2)
 
-        # PLOT A: Frobenius Matrix
         with col_f1:
-            st.subheader("1. Frobenius Matrix Form")
+            st.subheader("1. Frobenius Matrix")
             fig_m, ax_m = plt.subplots(figsize=(8, 8))
             ax_m.imshow(P_matrix, cmap='Greys', interpolation='none')
-            
-            # Draw lines for cohorts
             for b in cohort_boundaries[1:-1]:
                 ax_m.axhline(b-0.5, color='red', linewidth=0.5, alpha=0.5)
                 ax_m.axvline(b-0.5, color='red', linewidth=0.5, alpha=0.5)
-            
-            ax_m.set_title("Block Triangular Form\n(Red lines separate cohorts)", fontsize=10)
-            ax_m.set_xlabel("Target Node (Reordered)")
-            ax_m.set_ylabel("Source Node (Reordered)")
+            ax_m.axis('off')
             st.pyplot(fig_m)
 
-        # PLOT B: Cohort Graph
         with col_f2:
             st.subheader("2. Cohort Graph")
-            
             cmap = plt.get_cmap('tab20')
             
-            # Safe Color Mapping: explicitly list nodes to ensure alignment
-            draw_nodes = list(G_ana.nodes())
-            node_colors = []
-            for n in draw_nodes:
-                cid = node_to_cohort.get(n, 0)
-                node_colors.append(cmap(cid % 20))
-
-            fig_g, ax_g = plt.subplots(figsize=(8, 8))
-            
-            # Hierarchical Layout Logic
+            # Layout
             pos_super = nx.spring_layout(C, seed=42, k=2.0) 
             pos_final = {}
-            
             for cid in C.nodes():
                 center = pos_super[cid]
                 members = C.nodes[cid]['members']
@@ -300,7 +301,24 @@ with tab2:
                 sub_pos = nx.spring_layout(subG, center=center, scale=0.3)
                 pos_final.update(sub_pos)
 
-            # Draw with explicit nodelist to match colors
+            # Assign Colors & Draw
+            draw_nodes = list(G_ana.nodes())
+            node_colors = []
+            
+            # Update G_ana attributes for DOT export
+            for n in draw_nodes:
+                cid = node_to_cohort.get(n, 0)
+                rgba = cmap(cid % 20)
+                node_colors.append(rgba)
+                
+                # Set Graphviz attributes
+                hex_color = mcolors.to_hex(rgba)
+                G_ana.nodes[n]['style'] = 'filled'
+                G_ana.nodes[n]['fillcolor'] = hex_color
+                G_ana.nodes[n]['color'] = 'black'
+                G_ana.nodes[n]['fontcolor'] = 'black'
+
+            fig_g, ax_g = plt.subplots(figsize=(8, 8))
             nx.draw_networkx_nodes(G_ana, pos_final, nodelist=draw_nodes, node_size=100, node_color=node_colors, ax=ax_g)
             nx.draw_networkx_edges(G_ana, pos_final, alpha=0.2, arrows=True, ax=ax_g)
             
@@ -309,15 +327,27 @@ with tab2:
             top_cohorts = sorted(C.nodes(data="members"), key=lambda x: len(x[1]), reverse=True)[:10]
             for i, (cid, members) in enumerate(top_cohorts):
                 c = cmap(cid % 20)
-                legend_elements.append(patches.Patch(facecolor=c, label=f'Cohort {cid} ({len(members)} nodes)'))
-            
+                legend_elements.append(patches.Patch(facecolor=c, label=f'Cohort {cid}'))
             ax_g.legend(handles=legend_elements, loc='upper right', fontsize=8)
-            ax_g.set_title("Network Colored by Cohort")
             ax_g.axis('off')
             st.pyplot(fig_g)
             
-            buf_c = io.BytesIO()
-            plt.savefig(buf_c, format='png', dpi=300, bbox_inches='tight')
-            buf_c.seek(0)
-            st.download_button("Download Cohort Graph", buf_c, "cohort_graph.png", "image/png")
-            plt.close(fig_g)
+            # --- DOWNLOADS ---
+            c3, c4 = st.columns(2)
+            with c3:
+                buf_c = io.BytesIO()
+                plt.savefig(buf_c, format='png', dpi=300, bbox_inches='tight')
+                buf_c.seek(0)
+                st.download_button("📥 Download Image (PNG)", buf_c, "cohort_graph.png", "image/png")
+                plt.close(fig_g)
+            
+            with c4:
+                if HAS_PYDOT:
+                    dot_buf_c = io.StringIO()
+                    try:
+                        write_dot(G_ana, dot_buf_c)
+                        st.download_button("📄 Download Graphviz (.gv)", dot_buf_c.getvalue(), "cohorts.gv", "text/plain")
+                    except Exception as dot_err_c:
+                        st.error(f"Export failed: {dot_err_c}")
+                else:
+                    st.warning("Install 'pydot' to enable .gv export")
