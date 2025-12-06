@@ -199,3 +199,14 @@ if st.sidebar.button("Generate Graph", type="primary"):
 
         with col_stats:
             st.info("Statistics")
+            st.write(f"**Nodes:** {num_nodes}")
+            st.write(f"**Edges:** {G.number_of_edges()}")
+            st.write(f"**Density:** {nx.density(G):.4f}")
+            if not is_directed and nx.is_connected(G):
+                st.write(f"**Diameter:** {nx.diameter(G)}")
+            
+            with st.expander("Raw Data"):
+                st.write(np.array(matrix_data))
+
+    except Exception as e:
+        st.error(f"Error: {e}")
