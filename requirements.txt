@@ -4,3 +4,5 @@ networkx
 matplotlib
 numpy
 openpyxl
+xlrd
+scipy
