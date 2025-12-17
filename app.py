@@ -17,9 +17,9 @@ except ImportError:
     HAS_PYDOT = False
 
 # --- Core Functions ---
-def get_cycles_with_weights(G, target_weight=None, weight_attr='weight'):
+def get_cycles_with_node_weight(G, source_node, target_weight):
     """
-    Finds cycles and optionally filters them by a specific edge attribute value.
+    Finds cycles containing any edge starting at 'source_node' with weight 'target_weight'.
     """
     if G.is_directed():
         raw_cycles = list(nx.simple_cycles(G))
@@ -28,40 +28,48 @@ def get_cycles_with_weights(G, target_weight=None, weight_attr='weight'):
 
     valid_cycles = []
     cycle_edges = set()
+    
+    # Identify target edges: (source_node, v) where weight == target_weight
+    target_edges = []
+    for u, v, data in G.edges(data=True):
+        # Direction matters: u must be the source_node
+        if u == source_node: 
+            w = data.get('weight', 1)
+            # Check weight match
+            is_match = False
+            try:
+                if np.isclose(float(w), float(target_weight)): is_match = True
+            except:
+                if w == target_weight: is_match = True
+            
+            if is_match:
+                target_edges.append((u, v))
+
+    # Optimization: Set of target edges for fast lookup
+    target_edge_set = set(target_edges)
+    if not G.is_directed():
+        # For undirected, (u, v) is same as (v, u). Add reverse to set.
+        for u, v in target_edges:
+            target_edge_set.add((v, u))
 
     for cycle in raw_cycles:
         c_edges = []
-        has_target_weight = False
+        found_target = False
         
-        for i in range(len(cycle)):
-            u = cycle[i]
-            v = cycle[(i + 1) % len(cycle)]
+        for k in range(len(cycle)):
+            n1 = cycle[k]
+            n2 = cycle[(k + 1) % len(cycle)]
+            c_edges.append((n1, n2))
             
-            if G.has_edge(u, v):
-                data = G.get_edge_data(u, v)
-                # Retrieve the value for the selected column (default to 1 if missing)
-                w = data.get(weight_attr, 1) 
-                
-                c_edges.append((u, v))
-                
-                if target_weight is not None:
-                    # Robust float comparison
-                    try:
-                        if np.isclose(float(w), float(target_weight)):
-                            has_target_weight = True
-                    except (ValueError, TypeError):
-                        # Handle non-numeric weights (exact match)
-                        if w == target_weight:
-                            has_target_weight = True
-            
-        if target_weight is None:
-            valid_cycles.append(cycle)
-            cycle_edges.update(c_edges)
-        elif has_target_weight:
+            # Check if this edge is one of our interesting edges
+            if (n1, n2) in target_edge_set:
+                found_target = True
+        
+        if found_target:
             valid_cycles.append(cycle)
             cycle_edges.update(c_edges)
 
-    return valid_cycles, list(cycle_edges)
+    return valid_cycles, list(cycle_edges), target_edges
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
     M = np.array(M)
@@ -396,165 +404,144 @@ with tab2:
                 else:
                     st.warning("Install 'pydot' to enable .gv export")
 # ==========================================
-# TAB 3: Cycles & Weights
+# TAB 3: Cycles & Node-Weight Filter
 # ==========================================
 with tab3:
-    st.markdown("### Cycle Analysis & Weighted Filters")
+    st.markdown("### 🔍 Specific Weight Analysis")
     
-    # --- Step 0: Scan Graph for Available Columns ---
-    # We look at all edges to find what attributes exist (e.g., 'weight', 'capacity', 'cost')
-    all_edge_keys = set()
-    for u, v, data in G_original.edges(data=True):
-        all_edge_keys.update(data.keys())
+    # --- 1. Selection Controls ---
+    # We create a more dynamic UI: Select Node -> See available weights
     
-    # Default to 'weight' if it exists, otherwise pick the first available, or None
-    available_cols = list(all_edge_keys)
-    default_ix = available_cols.index('weight') if 'weight' in available_cols else 0
+    col_ctrl, col_viz = st.columns([1, 3])
 
-    # --- Step 1: Controls ---
-    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-    
-    with col_c1:
-        # NEW: Select which column to use for weighting/filtering
-        if available_cols:
-            weight_col = st.selectbox("Weight Column", available_cols, index=default_ix)
-        else:
-            st.warning("No edge attributes found. Using default value 1.0.")
-            weight_col = None
+    with col_ctrl:
+        st.subheader("1. Criteria")
+        all_nodes = list(G_original.nodes())
+        source_u = st.selectbox("Select Source Node", all_nodes)
 
-    with col_c2:
-        target_w = st.number_input("Target Value", value=1.0, step=0.1)
+        # Find weights outgoing from this node
+        out_weights = set()
+        for u, v, data in G_original.edges(data=True):
+            if u == source_u:
+                out_weights.add(data.get('weight', 1))
         
-    with col_c3:
-        view_mode = st.radio("View Mode", 
-                             ["Highlight Edges (Full Graph)", 
-                              "Filter Graph (Cycles Only)"])
+        # Sort weights for display
+        sorted_weights = sorted(list(out_weights), key=lambda x: float(x) if isinstance(x, (int, float)) else str(x))
+        
+        if not sorted_weights:
+            st.warning("Node has no outgoing edges.")
+            sel_weight = None
+        else:
+            sel_weight = st.selectbox("Select Weight", sorted_weights)
+        
+        st.divider()
+        st.subheader("2. Appearance")
+        show_labels = st.checkbox("Show Labels", value=True)
+        label_size = st.slider("Label Size", 5, 20, 10, disabled=not show_labels)
+        
+        layout_algo = st.selectbox("Layout", ["spring", "circular", "kamada_kawai", "shell"])
+        view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles)"])
 
-    with col_c4:
-        layout_option = st.selectbox("Layout Algorithm", 
-                                     ["spring (auto)", "circular", "shell", "kamada_kawai", "bipartite", "planar"])
-
-    st.divider()
-
-    # --- Helper: Layout Calculation (Same as before) ---
+    # --- Helper: Layout ---
     def get_layout(graph_obj, algo):
         if graph_obj.number_of_nodes() == 0: return {}
-        try:
-            if algo == "spring (auto)": return nx.spring_layout(graph_obj, seed=42)
-            elif algo == "circular": return nx.circular_layout(graph_obj)
-            elif algo == "shell": return nx.shell_layout(graph_obj)
-            elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
-            elif algo == "planar": return nx.planar_layout(graph_obj)
-            elif algo == "bipartite":
-                U_nodes = {n for n, d in graph_obj.nodes(data=True) if d.get("bipartite") == 0}
-                if not U_nodes: U_nodes, _ = nx.bipartite.sets(graph_obj)
-                return nx.bipartite_layout(graph_obj, U_nodes)
-        except:
-            return nx.spring_layout(graph_obj, seed=42)
+        if algo == "spring": return nx.spring_layout(graph_obj, seed=42, k=0.5)
+        elif algo == "circular": return nx.circular_layout(graph_obj)
+        elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
+        elif algo == "shell": return nx.shell_layout(graph_obj)
         return nx.spring_layout(graph_obj, seed=42)
 
-    # --- RENDERING LOGIC ---
-    fig_c, ax_c = plt.subplots(figsize=(10, 10))
-    should_render = False
-
-    # Define a safe getter for the selected column
-    def get_val(data_dict):
-        val = data_dict.get(weight_col, 1)
-        try:
-            return float(val)
-        except:
-            return val # Return as-is if string
-
-    # --- LOGIC A: HIGHLIGHT EDGES (Full Graph) ---
-    if view_mode == "Highlight Edges (Full Graph)":
-        pos_c = get_layout(G_original, layout_option)
-        
-        # Draw Nodes
-        nx.draw_networkx_nodes(G_original, pos_c, node_color='lightgrey', node_size=400, ax=ax_c)
-        nx.draw_networkx_labels(G_original, pos_c, ax=ax_c)
-
-        # Separate Edges by Selected Column Value
-        edges_target = []
-        edges_other = []
-        
-        for u, v, data in G_original.edges(data=True):
-            val = get_val(data)
-            
-            # Check match (handle float vs exact)
-            is_match = False
-            try:
-                if np.isclose(val, target_w): is_match = True
-            except:
-                if val == target_w: is_match = True
-
-            if is_match:
-                edges_target.append((u, v))
-            else:
-                edges_other.append((u, v))
-
-        # Draw Edges
-        nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_other, edge_color='black', alpha=0.3, ax=ax_c)
-        nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_target, edge_color='red', width=2.5, ax=ax_c)
-        
-        # Labels (Show value of selected column)
-        if weight_col:
-            edge_labels = nx.get_edge_attributes(G_original, weight_col)
-            # Format floats nicely if possible
-            edge_labels = {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in edge_labels.items()}
-            nx.draw_networkx_edge_labels(G_original, pos_c, edge_labels=edge_labels, ax=ax_c)
-        
-        should_render = True
-
-    # --- LOGIC B: FILTER (Cycles containing value) ---
-    else:
-        # Pass the selected column to the helper
-        valid_cycles, valid_edges = get_cycles_with_weights(G_original, target_w, weight_attr=weight_col)
-        
-        if not valid_cycles:
-            st.warning(f"No cycles found where column '{weight_col}' contains value {target_w}.")
-            should_render = False
+    # --- 2. Visualization Area ---
+    with col_viz:
+        if sel_weight is None:
+            st.info("Select a node with outgoing edges to begin.")
         else:
-            st.success(f"Found {len(valid_cycles)} cycles where '{weight_col}' has value {target_w}.")
+            fig_c, ax_c = plt.subplots(figsize=(8, 8))
             
-            G_sub = G_original.edge_subgraph(valid_edges).copy()
-            pos_sub = get_layout(G_sub, layout_option)
-            
-            nx.draw_networkx_nodes(G_sub, pos_sub, node_color='#ffcc00', node_size=500, ax=ax_c)
-            nx.draw_networkx_labels(G_sub, pos_sub, ax=ax_c)
-            
-            e_target = []
-            e_other = []
-            for u, v, data in G_sub.edges(data=True):
-                val = get_val(data)
+            # --- Logic A: Full Graph Highlight ---
+            if view_mode == "Highlight (Full)":
+                pos = get_layout(G_original, layout_algo)
                 
-                is_match = False
-                try:
-                    if np.isclose(val, target_w): is_match = True
-                except:
-                    if val == target_w: is_match = True
+                # Draw Nodes
+                nx.draw_networkx_nodes(G_original, pos, node_color='#E0E0E0', node_size=500, ax=ax_c)
+                
+                # Edges: Split into "Target" (from source with weight) and "Others"
+                e_target = []
+                e_other = []
+                
+                for u, v, data in G_original.edges(data=True):
+                    w = data.get('weight', 1)
+                    # Check connection matches selection
+                    is_match = False
+                    if u == source_u:
+                        try:
+                            if np.isclose(float(w), float(sel_weight)): is_match = True
+                        except:
+                            if w == sel_weight: is_match = True
+                    
+                    if is_match:
+                        e_target.append((u, v))
+                    else:
+                        e_other.append((u, v))
 
-                if is_match:
-                    e_target.append((u, v))
+                # Style: Curved edges if directed to look nice
+                conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
+
+                nx.draw_networkx_edges(G_original, pos, edgelist=e_other, edge_color='#B0B0B0', 
+                                       alpha=0.4, connectionstyle=conn_style, ax=ax_c)
+                nx.draw_networkx_edges(G_original, pos, edgelist=e_target, edge_color='#FF4B4B', 
+                                       width=2.5, connectionstyle=conn_style, ax=ax_c)
+                
+                if show_labels:
+                    nx.draw_networkx_labels(G_original, pos, font_size=label_size, ax=ax_c)
+
+            # --- Logic B: Filter Cycles ---
+            else:
+                valid_cycles, valid_edges, target_edges = get_cycles_with_node_weight(G_original, source_u, sel_weight)
+                
+                if not valid_cycles:
+                    st.warning(f"No cycles found passing through {source_u} with weight {sel_weight}.")
+                    ax_c.text(0.5, 0.5, "No Cycles Found", ha='center', va='center', transform=ax_c.transAxes)
+                    ax_c.axis('off')
                 else:
-                    e_other.append((u, v))
+                    st.success(f"Found {len(valid_cycles)} cycles.")
+                    
+                    G_sub = G_original.edge_subgraph(valid_edges).copy()
+                    pos = get_layout(G_sub, layout_algo)
+                    
+                    nx.draw_networkx_nodes(G_sub, pos, node_color='#FFD700', node_size=600, edgecolors='black', ax=ax_c)
+                    
+                    # Edges: Highlight the specific edges that triggered the filter
+                    e_trigger = []
+                    e_normal = []
+                    
+                    # Target edges calculated in helper might include some not in subgraph (unlikely but safe)
+                    # Intersection of G_sub edges and target_edges logic
+                    target_set = set(target_edges)
+                    
+                    for u, v in G_sub.edges():
+                        if (u, v) in target_set:
+                            e_trigger.append((u, v))
+                        else:
+                            e_normal.append((u, v))
 
-            nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_other, edge_color='black', style='dashed', ax=ax_c)
-            nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_target, edge_color='red', width=3, ax=ax_c)
-            
-            if weight_col:
-                edge_labels_sub = {e: G_sub.edges[e].get(weight_col, '') for e in G_sub.edges}
-                nx.draw_networkx_edge_labels(G_sub, pos_sub, edge_labels=edge_labels_sub, font_color='red', ax=ax_c)
-            
-            should_render = True
+                    conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
+                    
+                    nx.draw_networkx_edges(G_sub, pos, edgelist=e_normal, edge_color='black', 
+                                           style='dashed', width=1, connectionstyle=conn_style, ax=ax_c)
+                    nx.draw_networkx_edges(G_sub, pos, edgelist=e_trigger, edge_color='#FF4B4B', 
+                                           width=3, connectionstyle=conn_style, ax=ax_c)
 
-    if should_render:
-        ax_c.axis('off')
-        st.pyplot(fig_c)
-        plt.close(fig_c)
+                    if show_labels:
+                        nx.draw_networkx_labels(G_sub, pos, font_size=label_size, font_weight='bold', ax=ax_c)
 
+            ax_c.axis('off')
+            st.pyplot(fig_c)
+            plt.close(fig_c)
     # --- FINAL RENDER ---
     if should_render:
         ax_c.axis('off')
         st.pyplot(fig_c)
         plt.close(fig_c) # Good practice to close figure to free memory
+
 
