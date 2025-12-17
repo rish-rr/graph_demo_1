@@ -17,59 +17,84 @@ except ImportError:
     HAS_PYDOT = False
 
 # --- Core Functions ---
+
 def get_cycles_with_node_weight(G, source_node, target_weight):
     """
-    Finds cycles containing any edge starting at 'source_node' with weight 'target_weight'.
+    Optimized: Finds cycles passing through 'source_node' via an edge of 'target_weight'.
     """
+    # 1. Comparison Logic for Weights
+    def check_weight(w, target):
+        try:
+            return np.isclose(float(w), float(target))
+        except:
+            return w == target
+
+    # 2. Identify Valid Neighbors (Next Steps)
+    # We only care about cycles where source_node -> neighbor has specific weight
+    valid_neighbors = set()
+    for u, v, data in G.edges(data=True):
+        if G.is_directed():
+            if u == source_node:
+                if check_weight(data.get('weight', 1), target_weight):
+                    valid_neighbors.add(v)
+        else:
+            # Undirected: check both ways
+            if u == source_node and check_weight(data.get('weight', 1), target_weight):
+                valid_neighbors.add(v)
+            elif v == source_node and check_weight(data.get('weight', 1), target_weight):
+                valid_neighbors.add(u)
+
+    if not valid_neighbors:
+        return [], [], []
+
+    # 3. Cycle Detection (Generator based for performance)
     if G.is_directed():
-        raw_cycles = list(nx.simple_cycles(G))
+        cycle_gen = nx.simple_cycles(G) # Generator, don't list() immediately
     else:
-        raw_cycles = nx.cycle_basis(G)
+        cycle_gen = nx.cycle_basis(G)   # Returns list, fast for undirected
 
     valid_cycles = []
     cycle_edges = set()
     
-    # Identify target edges: (source_node, v) where weight == target_weight
-    target_edges = []
-    for u, v, data in G.edges(data=True):
-        # Direction matters: u must be the source_node
-        if u == source_node: 
-            w = data.get('weight', 1)
-            # Check weight match
-            is_match = False
-            try:
-                if np.isclose(float(w), float(target_weight)): is_match = True
-            except:
-                if w == target_weight: is_match = True
-            
-            if is_match:
-                target_edges.append((u, v))
+    # 4. Optimized Iteration
+    for cycle in cycle_gen:
+        if source_node not in cycle:
+            continue
 
-    # Optimization: Set of target edges for fast lookup
-    target_edge_set = set(target_edges)
-    if not G.is_directed():
-        # For undirected, (u, v) is same as (v, u). Add reverse to set.
-        for u, v in target_edges:
-            target_edge_set.add((v, u))
+        # Check if the cycle uses a valid outgoing connection from source_node
+        # In a cycle [a, b, c], if source is 'a', we check if 'b' is in valid_neighbors
+        idx = cycle.index(source_node)
+        next_node = cycle[(idx + 1) % len(cycle)]
+        
+        # For Undirected, the cycle could go either way (prev or next node)
+        is_valid_cycle = False
+        if next_node in valid_neighbors:
+            is_valid_cycle = True
+        elif not G.is_directed():
+            # Check previous node too for undirected
+            prev_node = cycle[(idx - 1) % len(cycle)]
+            if prev_node in valid_neighbors:
+                is_valid_cycle = True
 
-    for cycle in raw_cycles:
-        c_edges = []
-        found_target = False
-        
-        for k in range(len(cycle)):
-            n1 = cycle[k]
-            n2 = cycle[(k + 1) % len(cycle)]
-            c_edges.append((n1, n2))
-            
-            # Check if this edge is one of our interesting edges
-            if (n1, n2) in target_edge_set:
-                found_target = True
-        
-        if found_target:
+        if is_valid_cycle:
             valid_cycles.append(cycle)
-            cycle_edges.update(c_edges)
+            # Add all edges of this cycle to the set
+            for k in range(len(cycle)):
+                u, v = cycle[k], cycle[(k + 1) % len(cycle)]
+                cycle_edges.add((u, v))
+                if not G.is_directed():
+                    cycle_edges.add((v, u))
+
+    # Reconstruct target edges list for visualization highlighting
+    # These are edges specifically matching the criteria
+    target_edges = []
+    for neighbor in valid_neighbors:
+        target_edges.append((source_node, neighbor))
+        if not G.is_directed():
+            target_edges.append((neighbor, source_node))
 
     return valid_cycles, list(cycle_edges), target_edges
+
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
     M = np.array(M)
@@ -124,7 +149,7 @@ def matrix_to_graph(M, kind="auto"):
     return G, kind
 
 def load_matrix_smart(uploaded_file):
-    """Robustly loads a matrix from CSV/Excel, handling headers and indices."""
+    """Robustly loads a matrix from CSV/Excel."""
     uploaded_file.seek(0)
     file_type = uploaded_file.name.split('.')[-1].lower()
     
@@ -134,35 +159,26 @@ def load_matrix_smart(uploaded_file):
         else:
             return pd.read_excel(file, **kwargs)
 
-    # Strategy 1: Raw matrix
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=None)
         df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all():
-            return df_numeric.values.tolist()
-    except:
-        pass
+        if df_numeric.notna().all().all(): return df_numeric.values.tolist()
+    except: pass
 
-    # Strategy 2: With Index
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, index_col=0)
         df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all() and df_numeric.shape[0] > 0:
-            return df_numeric.values.tolist()
-    except:
-        pass
+        if df_numeric.notna().all().all() and df_numeric.shape[0] > 0: return df_numeric.values.tolist()
+    except: pass
     
-    # Strategy 3: Header, No Index
     try:
         uploaded_file.seek(0)
         df = read_func(uploaded_file, header=0)
         df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all():
-            return df_numeric.values.tolist()
-    except:
-        pass
+        if df_numeric.notna().all().all(): return df_numeric.values.tolist()
+    except: pass
 
     raise ValueError("Could not parse file as a numeric matrix.")
 
@@ -241,28 +257,7 @@ with tab1:
                 
                 ax.axis('off')
                 st.pyplot(fig)
-                
-                # --- DOWNLOADS ---
-                c1, c2 = st.columns(2)
-                with c1:
-                    # PNG Download
-                    buf = io.BytesIO()
-                    plt.savefig(buf, format='png', dpi=user_dpi, bbox_inches='tight')
-                    buf.seek(0)
-                    st.download_button("📥 Download Image (PNG)", buf, "graph.png", "image/png")
-                    plt.close(fig)
-                
-                with c2:
-                    # DOT Download
-                    if HAS_PYDOT:
-                        dot_buf = io.StringIO()
-                        try:
-                            write_dot(G_original, dot_buf)
-                            st.download_button("📄 Download Graphviz (.gv)", dot_buf.getvalue(), "graph.gv", "text/plain")
-                        except Exception as dot_err:
-                            st.error(f"Export failed: {dot_err}")
-                    else:
-                        st.warning("Install 'pydot' to enable .gv export")
+                plt.close(fig)
 
         with col_stats:
             st.write(f"**Nodes:** {num_nodes}")
@@ -280,15 +275,12 @@ with tab2:
     """)
 
     if st.button("Analyze Cohorts", type="primary", key="btn_frob"):
-        
-        # 1. Ensure Directed Graph
         if detected_kind == "biadjacency" or not G_original.is_directed():
             st.warning("Converting to Directed Graph for component analysis.")
             G_ana = G_original.to_directed()
         else:
-            G_ana = G_original.copy() # Copy to avoid mutating original with colors
+            G_ana = G_original.copy()
 
-        # 2. Compute Cohorts
         try:
             C = nx.condensation(G_ana) 
         except Exception as e:
@@ -303,13 +295,11 @@ with tab2:
         num_cohorts = len(C.nodes())
         st.success(f"Detected {num_cohorts} Cohorts (Strongly Connected Components)")
 
-        # 3. Topological Sort for Matrix
         try:
             cohort_order = list(nx.topological_sort(C))
         except:
             cohort_order = list(C.nodes()) 
 
-        # 4. Reorder Nodes
         ordered_nodes = []
         cohort_boundaries = [0]
         for cid in cohort_order:
@@ -317,7 +307,6 @@ with tab2:
             ordered_nodes.extend(members)
             cohort_boundaries.append(len(ordered_nodes))
 
-        # 5. Build Permuted Matrix
         node_to_idx = {n: i for i, n in enumerate(ordered_nodes)}
         N = len(ordered_nodes)
         P_matrix = np.zeros((N, N))
@@ -326,7 +315,6 @@ with tab2:
                 i, j = node_to_idx[u], node_to_idx[v]
                 P_matrix[i, j] = 1 
 
-        # --- Visualization ---
         col_f1, col_f2 = st.columns(2)
 
         with col_f1:
@@ -338,12 +326,11 @@ with tab2:
                 ax_m.axvline(b-0.5, color='red', linewidth=0.5, alpha=0.5)
             ax_m.axis('off')
             st.pyplot(fig_m)
+            plt.close(fig_m)
 
         with col_f2:
             st.subheader("2. Cohort Graph")
             cmap = plt.get_cmap('tab20')
-            
-            # Layout
             pos_super = nx.spring_layout(C, seed=42, k=2.0) 
             pos_final = {}
             for cid in C.nodes():
@@ -353,28 +340,16 @@ with tab2:
                 sub_pos = nx.spring_layout(subG, center=center, scale=0.3)
                 pos_final.update(sub_pos)
 
-            # Assign Colors & Draw
             draw_nodes = list(G_ana.nodes())
             node_colors = []
-            
-            # Update G_ana attributes for DOT export
             for n in draw_nodes:
                 cid = node_to_cohort.get(n, 0)
-                rgba = cmap(cid % 20)
-                node_colors.append(rgba)
-                
-                # Set Graphviz attributes
-                hex_color = mcolors.to_hex(rgba)
-                G_ana.nodes[n]['style'] = 'filled'
-                G_ana.nodes[n]['fillcolor'] = hex_color
-                G_ana.nodes[n]['color'] = 'black'
-                G_ana.nodes[n]['fontcolor'] = 'black'
+                node_colors.append(cmap(cid % 20))
 
             fig_g, ax_g = plt.subplots(figsize=(8, 8))
             nx.draw_networkx_nodes(G_ana, pos_final, nodelist=draw_nodes, node_size=100, node_color=node_colors, ax=ax_g)
             nx.draw_networkx_edges(G_ana, pos_final, alpha=0.2, arrows=True, ax=ax_g)
             
-            # Legend
             legend_elements = []
             top_cohorts = sorted(C.nodes(data="members"), key=lambda x: len(x[1]), reverse=True)[:10]
             for i, (cid, members) in enumerate(top_cohorts):
@@ -383,26 +358,8 @@ with tab2:
             ax_g.legend(handles=legend_elements, loc='upper right', fontsize=8)
             ax_g.axis('off')
             st.pyplot(fig_g)
-            
-            # --- DOWNLOADS ---
-            c3, c4 = st.columns(2)
-            with c3:
-                buf_c = io.BytesIO()
-                plt.savefig(buf_c, format='png', dpi=300, bbox_inches='tight')
-                buf_c.seek(0)
-                st.download_button("📥 Download Image (PNG)", buf_c, "cohort_graph.png", "image/png")
-                plt.close(fig_g)
-            
-            with c4:
-                if HAS_PYDOT:
-                    dot_buf_c = io.StringIO()
-                    try:
-                        write_dot(G_ana, dot_buf_c)
-                        st.download_button("📄 Download Graphviz (.gv)", dot_buf_c.getvalue(), "cohorts.gv", "text/plain")
-                    except Exception as dot_err_c:
-                        st.error(f"Export failed: {dot_err_c}")
-                else:
-                    st.warning("Install 'pydot' to enable .gv export")
+            plt.close(fig_g)
+
 # ==========================================
 # TAB 3: Cycles & Node-Weight Filter
 # ==========================================
@@ -417,10 +374,8 @@ with tab3:
         all_nodes = list(G_original.nodes())
         source_u = st.selectbox("Select Source Node", all_nodes)
 
-        # Find weights outgoing from this node
         out_weights = set()
         for u, v, data in G_original.edges(data=True):
-            # For undirected, check both directions if needed, but usually we treat source_u as the starting point
             if G_original.is_directed():
                 if u == source_u:
                     out_weights.add(data.get('weight', 1))
@@ -428,136 +383,8 @@ with tab3:
                 if u == source_u or v == source_u:
                     out_weights.add(data.get('weight', 1))
 
-        # Sort weights for display
         sorted_weights = sorted(list(out_weights), key=lambda x: float(x) if isinstance(x, (int, float)) else str(x))
         
         if not sorted_weights:
             st.warning("Node has no connecting edges.")
-            sel_weight = None
-        else:
-            sel_weight = st.selectbox("Select Weight", sorted_weights)
-        
-        st.divider()
-        st.subheader("2. Appearance")
-        show_labels = st.checkbox("Show Labels", value=True)
-        label_size = st.slider("Label Size", 5, 20, 10, disabled=not show_labels)
-        
-        layout_algo = st.selectbox("Layout", ["spring", "circular", "kamada_kawai", "shell"])
-        view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles)"])
-
-    # --- Helper: Layout ---
-    def get_layout(graph_obj, algo):
-        if graph_obj.number_of_nodes() == 0: return {}
-        try:
-            if algo == "spring": return nx.spring_layout(graph_obj, seed=42, k=0.5)
-            elif algo == "circular": return nx.circular_layout(graph_obj)
-            elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
-            elif algo == "shell": return nx.shell_layout(graph_obj)
-        except:
-            return nx.spring_layout(graph_obj, seed=42)
-        return nx.spring_layout(graph_obj, seed=42)
-
-    # --- 2. Visualization Area ---
-    with col_viz:
-        if sel_weight is None:
-            st.info("Select a node with edges to begin.")
-        else:
-            fig_c, ax_c = plt.subplots(figsize=(8, 8))
-            
-            # --- Logic A: Full Graph Highlight ---
-            if view_mode == "Highlight (Full)":
-                pos = get_layout(G_original, layout_algo)
-                
-                # Draw Nodes
-                nx.draw_networkx_nodes(G_original, pos, node_color='#E0E0E0', node_size=500, ax=ax_c)
-                
-                # Edges: Split into "Target" (connected to source with weight) and "Others"
-                e_target = []
-                e_other = []
-                
-                for u, v, data in G_original.edges(data=True):
-                    w = data.get('weight', 1)
-                    
-                    # Check connection matches selection
-                    is_match = False
-                    is_connected_to_source = False
-                    
-                    if G_original.is_directed():
-                        if u == source_u: is_connected_to_source = True
-                    else:
-                        if u == source_u or v == source_u: is_connected_to_source = True
-
-                    if is_connected_to_source:
-                        try:
-                            if np.isclose(float(w), float(sel_weight)): is_match = True
-                        except:
-                            if w == sel_weight: is_match = True
-                    
-                    if is_match:
-                        e_target.append((u, v))
-                    else:
-                        e_other.append((u, v))
-
-                # Style: Curved edges if directed
-                conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
-
-                # Safely draw edges only if lists are not empty
-                if e_other:
-                    nx.draw_networkx_edges(G_original, pos, edgelist=e_other, edge_color='#B0B0B0', 
-                                           alpha=0.4, connectionstyle=conn_style, ax=ax_c)
-                if e_target:
-                    nx.draw_networkx_edges(G_original, pos, edgelist=e_target, edge_color='#FF4B4B', 
-                                           width=2.5, connectionstyle=conn_style, ax=ax_c)
-                
-                if show_labels:
-                    nx.draw_networkx_labels(G_original, pos, font_size=label_size, ax=ax_c)
-
-            # --- Logic B: Filter Cycles ---
-            else:
-                valid_cycles, valid_edges, target_edges = get_cycles_with_node_weight(G_original, source_u, sel_weight)
-                
-                if not valid_cycles:
-                    st.warning(f"No cycles found passing through {source_u} with weight {sel_weight}.")
-                    ax_c.text(0.5, 0.5, "No Cycles Found", ha='center', va='center', transform=ax_c.transAxes)
-                    ax_c.axis('off')
-                else:
-                    st.success(f"Found {len(valid_cycles)} cycles.")
-                    
-                    G_sub = G_original.edge_subgraph(valid_edges).copy()
-                    pos = get_layout(G_sub, layout_algo)
-                    
-                    nx.draw_networkx_nodes(G_sub, pos, node_color='#FFD700', node_size=600, edgecolors='black', ax=ax_c)
-                    
-                    # Edges: Highlight the specific edges that triggered the filter
-                    e_trigger = []
-                    e_normal = []
-                    
-                    target_set = set(target_edges)
-                    # For undirected, ensure both directions are in the set
-                    if not G_original.is_directed():
-                        for u, v in list(target_set):
-                            target_set.add((v, u))
-                    
-                    for u, v in G_sub.edges():
-                        if (u, v) in target_set:
-                            e_trigger.append((u, v))
-                        else:
-                            e_normal.append((u, v))
-
-                    conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
-                    
-                    # FIX: Only call draw if the list is not empty
-                    if e_normal:
-                        nx.draw_networkx_edges(G_sub, pos, edgelist=e_normal, edge_color='black', 
-                                               style='dashed', width=1, connectionstyle=conn_style, ax=ax_c)
-                    
-                    if e_trigger:
-                        nx.draw_networkx_edges(G_sub, pos, edgelist=e_trigger, edge_color='#FF4B4B', 
-                                               width=3, connectionstyle=conn_style, ax=ax_c)
-
-                    if show_labels:
-                        nx.draw_networkx_labels(G_sub, pos, font_size=label_size, font_weight='bold', ax=ax_c)
-
-            ax_c.axis('off')
-            st.pyplot(fig_c)
-            plt.close(fig_c)
+            sel
