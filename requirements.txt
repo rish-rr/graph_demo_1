@@ -1,9 +1,8 @@
 streamlit
+numpy
 pandas
 networkx
 matplotlib
-numpy
-openpyxl
-xlrd
 scipy
+openpyxl
 pydot
