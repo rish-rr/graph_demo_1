@@ -410,8 +410,6 @@ with tab3:
     st.markdown("### 🔍 Specific Weight Analysis")
     
     # --- 1. Selection Controls ---
-    # We create a more dynamic UI: Select Node -> See available weights
-    
     col_ctrl, col_viz = st.columns([1, 3])
 
     with col_ctrl:
@@ -422,14 +420,19 @@ with tab3:
         # Find weights outgoing from this node
         out_weights = set()
         for u, v, data in G_original.edges(data=True):
-            if u == source_u:
-                out_weights.add(data.get('weight', 1))
-        
+            # For undirected, check both directions if needed, but usually we treat source_u as the starting point
+            if G_original.is_directed():
+                if u == source_u:
+                    out_weights.add(data.get('weight', 1))
+            else:
+                if u == source_u or v == source_u:
+                    out_weights.add(data.get('weight', 1))
+
         # Sort weights for display
         sorted_weights = sorted(list(out_weights), key=lambda x: float(x) if isinstance(x, (int, float)) else str(x))
         
         if not sorted_weights:
-            st.warning("Node has no outgoing edges.")
+            st.warning("Node has no connecting edges.")
             sel_weight = None
         else:
             sel_weight = st.selectbox("Select Weight", sorted_weights)
@@ -445,16 +448,19 @@ with tab3:
     # --- Helper: Layout ---
     def get_layout(graph_obj, algo):
         if graph_obj.number_of_nodes() == 0: return {}
-        if algo == "spring": return nx.spring_layout(graph_obj, seed=42, k=0.5)
-        elif algo == "circular": return nx.circular_layout(graph_obj)
-        elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
-        elif algo == "shell": return nx.shell_layout(graph_obj)
+        try:
+            if algo == "spring": return nx.spring_layout(graph_obj, seed=42, k=0.5)
+            elif algo == "circular": return nx.circular_layout(graph_obj)
+            elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
+            elif algo == "shell": return nx.shell_layout(graph_obj)
+        except:
+            return nx.spring_layout(graph_obj, seed=42)
         return nx.spring_layout(graph_obj, seed=42)
 
     # --- 2. Visualization Area ---
     with col_viz:
         if sel_weight is None:
-            st.info("Select a node with outgoing edges to begin.")
+            st.info("Select a node with edges to begin.")
         else:
             fig_c, ax_c = plt.subplots(figsize=(8, 8))
             
@@ -465,15 +471,23 @@ with tab3:
                 # Draw Nodes
                 nx.draw_networkx_nodes(G_original, pos, node_color='#E0E0E0', node_size=500, ax=ax_c)
                 
-                # Edges: Split into "Target" (from source with weight) and "Others"
+                # Edges: Split into "Target" (connected to source with weight) and "Others"
                 e_target = []
                 e_other = []
                 
                 for u, v, data in G_original.edges(data=True):
                     w = data.get('weight', 1)
+                    
                     # Check connection matches selection
                     is_match = False
-                    if u == source_u:
+                    is_connected_to_source = False
+                    
+                    if G_original.is_directed():
+                        if u == source_u: is_connected_to_source = True
+                    else:
+                        if u == source_u or v == source_u: is_connected_to_source = True
+
+                    if is_connected_to_source:
                         try:
                             if np.isclose(float(w), float(sel_weight)): is_match = True
                         except:
@@ -484,13 +498,16 @@ with tab3:
                     else:
                         e_other.append((u, v))
 
-                # Style: Curved edges if directed to look nice
+                # Style: Curved edges if directed
                 conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
 
-                nx.draw_networkx_edges(G_original, pos, edgelist=e_other, edge_color='#B0B0B0', 
-                                       alpha=0.4, connectionstyle=conn_style, ax=ax_c)
-                nx.draw_networkx_edges(G_original, pos, edgelist=e_target, edge_color='#FF4B4B', 
-                                       width=2.5, connectionstyle=conn_style, ax=ax_c)
+                # Safely draw edges only if lists are not empty
+                if e_other:
+                    nx.draw_networkx_edges(G_original, pos, edgelist=e_other, edge_color='#B0B0B0', 
+                                           alpha=0.4, connectionstyle=conn_style, ax=ax_c)
+                if e_target:
+                    nx.draw_networkx_edges(G_original, pos, edgelist=e_target, edge_color='#FF4B4B', 
+                                           width=2.5, connectionstyle=conn_style, ax=ax_c)
                 
                 if show_labels:
                     nx.draw_networkx_labels(G_original, pos, font_size=label_size, ax=ax_c)
@@ -515,9 +532,11 @@ with tab3:
                     e_trigger = []
                     e_normal = []
                     
-                    # Target edges calculated in helper might include some not in subgraph (unlikely but safe)
-                    # Intersection of G_sub edges and target_edges logic
                     target_set = set(target_edges)
+                    # For undirected, ensure both directions are in the set
+                    if not G_original.is_directed():
+                        for u, v in list(target_set):
+                            target_set.add((v, u))
                     
                     for u, v in G_sub.edges():
                         if (u, v) in target_set:
@@ -527,10 +546,14 @@ with tab3:
 
                     conn_style = "arc3,rad=0.1" if G_original.is_directed() else None
                     
-                    nx.draw_networkx_edges(G_sub, pos, edgelist=e_normal, edge_color='black', 
-                                           style='dashed', width=1, connectionstyle=conn_style, ax=ax_c)
-                    nx.draw_networkx_edges(G_sub, pos, edgelist=e_trigger, edge_color='#FF4B4B', 
-                                           width=3, connectionstyle=conn_style, ax=ax_c)
+                    # FIX: Only call draw if the list is not empty
+                    if e_normal:
+                        nx.draw_networkx_edges(G_sub, pos, edgelist=e_normal, edge_color='black', 
+                                               style='dashed', width=1, connectionstyle=conn_style, ax=ax_c)
+                    
+                    if e_trigger:
+                        nx.draw_networkx_edges(G_sub, pos, edgelist=e_trigger, edge_color='#FF4B4B', 
+                                               width=3, connectionstyle=conn_style, ax=ax_c)
 
                     if show_labels:
                         nx.draw_networkx_labels(G_sub, pos, font_size=label_size, font_weight='bold', ax=ax_c)
@@ -538,7 +561,3 @@ with tab3:
             ax_c.axis('off')
             st.pyplot(fig_c)
             plt.close(fig_c)
-    
-
-
-
