@@ -17,6 +17,56 @@ except ImportError:
     HAS_PYDOT = False
 
 # --- Core Functions ---
+def get_cycles_with_weights(G, target_weight=None):
+    """
+    Finds cycles and optionally filters them by edge weight.
+    Returns:
+        - valid_cycles: List of cycles (each cycle is a list of nodes)
+        - cycle_edges: List of edges involved in these cycles
+    """
+    # Detect cycles (simple_cycles for DiGraph, cycle_basis for Graph)
+    if G.is_directed():
+        # WARNING: simple_cycles is expensive on large dense graphs
+        raw_cycles = list(nx.simple_cycles(G)) 
+    else:
+        raw_cycles = nx.cycle_basis(G)
+
+    valid_cycles = []
+    cycle_edges = set()
+
+    for cycle in raw_cycles:
+        # Create edge list for this cycle
+        # e.g., [0, 1, 2] -> [(0,1), (1,2), (2,0)]
+        c_edges = []
+        has_target_weight = False
+        
+        for i in range(len(cycle)):
+            u = cycle[i]
+            v = cycle[(i + 1) % len(cycle)]
+            
+            # Handle MultiGraphs or simple Graphs
+            if G.has_edge(u, v):
+                data = G.get_edge_data(u, v)
+                w = data.get('weight', 1) # Default weight 1 if missing
+                c_edges.append((u, v))
+                
+                # Check weight condition
+                if target_weight is not None:
+                    # geometric tolerance comparison for floats
+                    if np.isclose(w, target_weight):
+                        has_target_weight = True
+            
+        # Filter Logic
+        if target_weight is None:
+            # No filter, accept all
+            valid_cycles.append(cycle)
+            cycle_edges.update(c_edges)
+        elif has_target_weight:
+            # Only keep cycle if it contains the specific weight
+            valid_cycles.append(cycle)
+            cycle_edges.update(c_edges)
+
+    return valid_cycles, list(cycle_edges)
 
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
@@ -152,7 +202,7 @@ except Exception as e:
     st.stop()
 
 # --- Tabs ---
-tab1, tab2 = st.tabs(["Standard Visualization", "Frobenius Analysis (Cohorts)"])
+tab1, tab2, tab3 = st.tabs(["Standard Visualization", "Frobenius Analysis", "Cycles & Weights"])
 
 # ==========================================
 # TAB 1: Standard Visualization
@@ -351,3 +401,98 @@ with tab2:
                         st.error(f"Export failed: {dot_err_c}")
                 else:
                     st.warning("Install 'pydot' to enable .gv export")
+# ==========================================
+# TAB 3: Cycles & Weights
+# ==========================================
+with tab3:
+    st.markdown("### Cycle Analysis & Weighted Filters")
+    
+    col_c1, col_c2 = st.columns(2)
+    
+    with col_c1:
+        # User Input: Weight to find
+        target_w = st.number_input("Target Edge Weight", value=1.0, step=0.1)
+        
+    with col_c2:
+        # Mode Selection
+        view_mode = st.radio("View Mode", 
+                             ["Highlight Edges (Full Graph)", 
+                              "Filter Graph (Cycles Only)"])
+
+    if st.button("Process Cycles", key="btn_cycles"):
+        
+        # 1. Prepare Layout
+        pos_c = nx.circular_layout(G_original) if view_mode == "Filter Graph (Cycles Only)" else nx.spring_layout(G_original, seed=42)
+        fig_c, ax_c = plt.subplots(figsize=(10, 10))
+
+        # --- LOGIC A: HIGHLIGHT EDGES (Full Graph) ---
+        if view_mode == "Highlight Edges (Full Graph)":
+            st.info(f"Showing full graph. Edges with weight {target_w} are RED.")
+            
+            # Draw Nodes
+            nx.draw_networkx_nodes(G_original, pos_c, node_color='lightgrey', node_size=400, ax=ax_c)
+            nx.draw_networkx_labels(G_original, pos_c, ax=ax_c)
+
+            # Separate Edges by Weight
+            edges_target = []
+            edges_other = []
+            
+            for u, v, data in G_original.edges(data=True):
+                w = data.get('weight', 1)
+                if np.isclose(w, target_w):
+                    edges_target.append((u, v))
+                else:
+                    edges_other.append((u, v))
+
+            # Draw "Other" Edges (Black, Thin)
+            nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_other, 
+                                   edge_color='black', alpha=0.3, ax=ax_c)
+            
+            # Draw "Target" Edges (Red, Thick)
+            nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_target, 
+                                   edge_color='red', width=2.5, ax=ax_c)
+            
+            # Label Edges
+            edge_labels = nx.get_edge_attributes(G_original, 'weight')
+            nx.draw_networkx_edge_labels(G_original, pos_c, edge_labels=edge_labels, ax=ax_c)
+
+        # --- LOGIC B: FILTER (Cycles containing weight) ---
+        else:
+            # Get cycles that contain at least one edge of target_w
+            valid_cycles, valid_edges = get_cycles_with_weights(G_original, target_w)
+            
+            if not valid_cycles:
+                st.warning(f"No cycles found containing edges with weight {target_w}.")
+            else:
+                st.success(f"Found {len(valid_cycles)} cycles containing weight {target_w}.")
+                
+                # Build Subgraph from these edges
+                G_sub = G_original.edge_subgraph(valid_edges).copy()
+                
+                # Recalculate layout for the subgraph to make it look nice
+                pos_sub = nx.shell_layout(G_sub)
+                
+                # Draw Nodes involved in cycles
+                nx.draw_networkx_nodes(G_sub, pos_sub, node_color='#ffcc00', node_size=500, ax=ax_c)
+                nx.draw_networkx_labels(G_sub, pos_sub, ax=ax_c)
+                
+                # Draw Edges (Color the target weight edges Red, others Black)
+                e_target = []
+                e_other = []
+                for u, v, data in G_sub.edges(data=True):
+                    w = data.get('weight', 1)
+                    if np.isclose(w, target_w):
+                        e_target.append((u, v))
+                    else:
+                        e_other.append((u, v))
+
+                nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_other, edge_color='black', style='dashed', ax=ax_c)
+                nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_target, edge_color='red', width=3, ax=ax_c)
+                
+                # Add Labels
+                edge_labels_sub = {e: G_sub.edges[e]['weight'] for e in G_sub.edges}
+                nx.draw_networkx_edge_labels(G_sub, pos_sub, edge_labels=edge_labels_sub, font_color='red', ax=ax_c)
+
+        ax_c.axis('off')
+        st.pyplot(fig_c)
+
