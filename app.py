@@ -538,10 +538,7 @@ with tab3:
             ax_c.axis('off')
             st.pyplot(fig_c)
             plt.close(fig_c)
-    # --- FINAL RENDER ---
-    if should_render:
-        ax_c.axis('off')
-        st.pyplot(fig_c)
-        plt.close(fig_c) # Good practice to close figure to free memory
+    
+
 
 
