@@ -93,11 +93,4 @@ def get_cycles_with_node_weight(G, source_node, target_val, weight_attr='weight'
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
     M = np.array(M)
-    M = np.nan_to_num(M) 
-    n_rows, n_cols = M.shape
-
-    if kind == "auto":
-        if n_rows == n_cols:
-            kind = "adjacency"
-        else:
-            col_nnz = (M !=
+    M = np.nan_to_num(
