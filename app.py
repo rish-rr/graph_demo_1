@@ -100,9 +100,7 @@ def matrix_to_graph(M, kind="auto"):
         if n_rows == n_cols:
             kind = "adjacency"
         else:
-            # FIX: Ensure parentheses are closed and .sum() is called
             col_nnz = (M != 0).sum(axis=0)
-            
             if np.all((col_nnz >= 1) & (col_nnz <= 2)):
                 kind = "incidence"
             else:
@@ -468,8 +466,9 @@ with tab3:
             try:
                 fig_c, ax_c = plt.subplots(figsize=(8, 8))
                 
+                # FIX: Explicit string for connectionstyle (rad=0.0 is straight)
                 use_arrows = bool(G_original.is_directed())
-                conn_style = "arc3,rad=0.1" if use_arrows else None
+                conn_style = "arc3,rad=0.1" if use_arrows else "arc3,rad=0.0"
 
                 # --- Logic A: Full Graph Highlight ---
                 if view_mode == "Highlight (Full)":
