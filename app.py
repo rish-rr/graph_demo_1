@@ -404,31 +404,31 @@ with tab2:
 # ==========================================
 # TAB 3: Cycles & Weights
 # ==========================================
-
 with tab3:
     st.markdown("### Cycle Analysis & Weighted Filters")
     
+    # 1. Controls
     col_c1, col_c2, col_c3 = st.columns(3)
     
     with col_c1:
-        # User Input: Weight to find
         target_w = st.number_input("Target Edge Weight", value=1.0, step=0.1)
         
     with col_c2:
-        # Mode Selection
         view_mode = st.radio("View Mode", 
                              ["Highlight Edges (Full Graph)", 
                               "Filter Graph (Cycles Only)"])
 
     with col_c3:
-        # Layout Selection
         layout_option = st.selectbox("Layout Algorithm", 
                                      ["spring (auto)", "circular", "shell", "kamada_kawai", "bipartite", "planar"])
 
-    if st.button("Process Cycles", key="btn_cycles"):
-        
-        # --- Helper: Layout Calculation ---
-        def get_layout(graph_obj, algo):
+    st.divider() # Visual separation
+
+    # --- Helper: Layout Calculation ---
+    def get_layout(graph_obj, algo):
+        if graph_obj.number_of_nodes() == 0:
+            return {}
+        try:
             if algo == "spring (auto)":
                 return nx.spring_layout(graph_obj, seed=42)
             elif algo == "circular":
@@ -438,57 +438,97 @@ with tab3:
             elif algo == "kamada_kawai":
                 return nx.kamada_kawai_layout(graph_obj)
             elif algo == "planar":
-                try:
-                    return nx.planar_layout(graph_obj)
-                except nx.NetworkXException:
-                    st.warning("Graph is not planar. Falling back to spring layout.")
-                    return nx.spring_layout(graph_obj, seed=42)
+                return nx.planar_layout(graph_obj)
             elif algo == "bipartite":
-                # Attempt to find bipartite sets automatically
-                try:
-                    U_nodes = {n for n, d in graph_obj.nodes(data=True) if d.get("bipartite") == 0}
-                    if not U_nodes: # If not explicitly marked, try to detect
-                        U_nodes, _ = nx.bipartite.sets(graph_obj)
-                    return nx.bipartite_layout(graph_obj, U_nodes)
-                except:
-                    st.warning("Graph is not bipartite. Falling back to spring layout.")
-                    return nx.spring_layout(graph_obj, seed=42)
+                U_nodes = {n for n, d in graph_obj.nodes(data=True) if d.get("bipartite") == 0}
+                if not U_nodes: 
+                    U_nodes, _ = nx.bipartite.sets(graph_obj)
+                return nx.bipartite_layout(graph_obj, U_nodes)
+        except Exception as e:
+            # Fallback for planar/bipartite errors
             return nx.spring_layout(graph_obj, seed=42)
+        return nx.spring_layout(graph_obj, seed=42)
 
-        fig_c, ax_c = plt.subplots(figsize=(10, 10))
+    # --- RENDERING LOGIC ---
+    # We remove the button so it auto-updates. 
+    # If the graph is heavy, we could use a checkbox "Enable Live Preview".
+    
+    fig_c, ax_c = plt.subplots(figsize=(10, 10))
+    should_render = False
 
-        # --- LOGIC A: HIGHLIGHT EDGES (Full Graph) ---
-        if view_mode == "Highlight Edges (Full Graph)":
-            st.info(f"Showing full graph. Edges with weight {target_w} are RED.")
+    # --- LOGIC A: HIGHLIGHT EDGES (Full Graph) ---
+    if view_mode == "Highlight Edges (Full Graph)":
+        
+        pos_c = get_layout(G_original, layout_option)
+
+        # Draw Nodes
+        nx.draw_networkx_nodes(G_original, pos_c, node_color='lightgrey', node_size=400, ax=ax_c)
+        nx.draw_networkx_labels(G_original, pos_c, ax=ax_c)
+
+        # Separate Edges
+        edges_target = []
+        edges_other = []
+        
+        for u, v, data in G_original.edges(data=True):
+            w = data.get('weight', 1)
+            # Use isclose for float comparison
+            if np.isclose(w, target_w):
+                edges_target.append((u, v))
+            else:
+                edges_other.append((u, v))
+
+        # Draw Edges
+        nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_other, 
+                               edge_color='black', alpha=0.3, ax=ax_c)
+        nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_target, 
+                               edge_color='red', width=2.5, ax=ax_c)
+        
+        # Labels
+        edge_labels = nx.get_edge_attributes(G_original, 'weight')
+        nx.draw_networkx_edge_labels(G_original, pos_c, edge_labels=edge_labels, ax=ax_c)
+        
+        should_render = True
+
+    # --- LOGIC B: FILTER (Cycles containing weight) ---
+    else:
+        # Get cycles that contain at least one edge of target_w
+        valid_cycles, valid_edges = get_cycles_with_weights(G_original, target_w)
+        
+        if not valid_cycles:
+            st.warning(f"No cycles found containing edges with weight {target_w}.")
+            should_render = False # Do not render empty plot
+        else:
+            st.success(f"Found {len(valid_cycles)} cycles containing weight {target_w}.")
             
-            # Calculate Layout
-            pos_c = get_layout(G_original, layout_option)
-
-            # Draw Nodes
-            nx.draw_networkx_nodes(G_original, pos_c, node_color='lightgrey', node_size=400, ax=ax_c)
-            nx.draw_networkx_labels(G_original, pos_c, ax=ax_c)
-
-            # Separate Edges by Weight
-            edges_target = []
-            edges_other = []
+            # Build Subgraph
+            G_sub = G_original.edge_subgraph(valid_edges).copy()
             
-            for u, v, data in G_original.edges(data=True):
+            # Layout
+            pos_sub = get_layout(G_sub, layout_option)
+            
+            # Draw
+            nx.draw_networkx_nodes(G_sub, pos_sub, node_color='#ffcc00', node_size=500, ax=ax_c)
+            nx.draw_networkx_labels(G_sub, pos_sub, ax=ax_c)
+            
+            e_target = []
+            e_other = []
+            for u, v, data in G_sub.edges(data=True):
                 w = data.get('weight', 1)
                 if np.isclose(w, target_w):
-                    edges_target.append((u, v))
+                    e_target.append((u, v))
                 else:
-                    edges_other.append((u, v))
+                    e_other.append((u, v))
 
-            # Draw "Other" Edges (Black, Thin)
-            nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_other, 
-                                   edge_color='black', alpha=0.3, ax=ax_c)
+            nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_other, edge_color='black', style='dashed', ax=ax_c)
+            nx.draw_networkx_edges(G_sub, pos_sub, edgelist=e_target, edge_color='red', width=3, ax=ax_c)
             
-            # Draw "Target" Edges (Red, Thick)
-            nx.draw_networkx_edges(G_original, pos_c, edgelist=edges_target, 
-                                   edge_color='red', width=2.5, ax=ax_c)
+            edge_labels_sub = {e: G_sub.edges[e]['weight'] for e in G_sub.edges}
+            nx.draw_networkx_edge_labels(G_sub, pos_sub, edge_labels=edge_labels_sub, font_color='red', ax=ax_c)
             
-            # Label Edges
-            edge_labels = nx.get_edge_attributes(G_original, 'weight')
-            nx.draw_networkx_edge_labels(G_original, pos_c, edge_labels=edge_labels, ax=ax_c)
+            should_render = True
 
-        # --- LOGIC B: FILTER (Cycles containing weight) ---
+    # --- FINAL RENDER ---
+    if should_render:
+        ax_c.axis('off')
+        st.pyplot(fig_c)
+        plt.close(fig_c) # Good practice to close figure to free memory
