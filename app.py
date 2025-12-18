@@ -318,18 +318,71 @@ with tab2:
     st.markdown("""
     **Frobenius Normal Form Analysis:** Identifies **Cohorts** (Strongly Connected Components).  
     """)
+    
+    col_t2_1, col_t2_2 = st.columns([1, 2])
+    with col_t2_1:
+        frob_mode = st.selectbox(
+            "Matrix Interpretation for Analysis", 
+            ["Same as Sidebar", "adjacency", "incidence", "biadjacency"],
+            key="frob_mode"
+        )
 
     if st.button("Analyze Cohorts", type="primary", key="btn_frob"):
-        if detected_kind == "biadjacency" or not G_original.is_directed():
-            st.warning("Converting to Directed Graph for component analysis.")
-            G_ana = G_original.to_directed()
-        else:
-            G_ana = G_original.copy()
+        
+        # --- NEW LOGIC: Handle Biadjacency -> Adjacency Conversion ---
+        current_target_kind = frob_mode if frob_mode != "Same as Sidebar" else detected_kind
 
+        if current_target_kind == "biadjacency":
+            st.info("🔄 Treating Biadjacency Matrix as Adjacency for Cohort Analysis (creating equivalent graph).")
+            
+            # Check dimensions to decide strategy
+            M = np.array(matrix_data)
+            rows, cols = M.shape
+            
+            if rows == cols:
+                # Square Matrix: Treat directly as Adjacency (Node i -> Node j)
+                try:
+                    G_ana, _ = matrix_to_graph(matrix_data, kind="adjacency")
+                except Exception as e:
+                    st.error(f"Conversion failed: {e}")
+                    st.stop()
+            else:
+                # Rectangular Matrix: Create Bipartite Adjacency Matrix
+                # Block Matrix: [[0, M], [0, 0]] (Directed U->V) or [[0, M], [M.T, 0]] (Undirected)
+                # Frobenius usually requires square, so we build the square bipartite adjacency.
+                st.warning(f"Matrix is rectangular ({rows}x{cols}). Building Bipartite Adjacency Graph.")
+                
+                # Construct Bipartite Graph explicitly
+                G_ana = nx.DiGraph()
+                # Row nodes 0..rows-1, Col nodes rows..rows+cols-1
+                G_ana.add_nodes_from(range(rows + cols))
+                
+                for r in range(rows):
+                    for c in range(cols):
+                        val = M[r][c]
+                        if val != 0:
+                            # Edge from Row Node r -> Col Node (rows + c)
+                            G_ana.add_edge(r, rows + c, weight=val)
+
+        elif frob_mode != "Same as Sidebar":
+            # Manual override (e.g., forcing incidence)
+            try:
+                G_ana, _ = matrix_to_graph(matrix_data, kind=frob_mode)
+            except Exception as e:
+                st.error(f"Error rebuilding graph as {frob_mode}: {e}")
+                st.stop()
+        else:
+            # Default behavior (use globally detected graph)
+            if detected_kind == "biadjacency" or not G_original.is_directed():
+                 G_ana = G_original.to_directed()
+            else:
+                 G_ana = G_original.copy()
+
+        # --- Proceed with Frobenius Analysis ---
         try:
             C = nx.condensation(G_ana) 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Error calculating cohorts: {e}")
             st.stop()
         
         node_to_cohort = {}
@@ -362,18 +415,16 @@ with tab2:
 
         col_f1, col_f2 = st.columns(2)
 
-        # --- 1. Frobenius Matrix (Improved Visuals) ---
+        # --- 1. Frobenius Matrix ---
         with col_f1:
             st.subheader("1. Frobenius Matrix")
             fig_m, ax_m = plt.subplots(figsize=(8, 8))
             ax_m.imshow(P_matrix, cmap='Blues', interpolation='none', aspect='equal')
             
-            # Draw Red Cohort Boundaries
             for b in cohort_boundaries[1:-1]:
                 ax_m.axhline(b-0.5, color='red', linewidth=1.0)
                 ax_m.axvline(b-0.5, color='red', linewidth=1.0)
             
-            # Axis Labels
             ax_m.set_xticks(range(N))
             ax_m.set_yticks(range(N))
             ax_m.set_xticklabels(ordered_nodes, rotation=90, fontsize=6)
@@ -383,7 +434,7 @@ with tab2:
             st.pyplot(fig_m)
             plt.close(fig_m)
 
-        # --- 2. Cohort Graph (Labeled Nodes) ---
+        # --- 2. Cohort Graph ---
         with col_f2:
             st.subheader("2. Cohort Graph")
             cmap = plt.get_cmap('tab20')
@@ -405,7 +456,6 @@ with tab2:
             conn_style = "arc3,rad=0.1"
             nx.draw_networkx_edges(G_ana, pos_final, alpha=0.3, arrows=True, connectionstyle=conn_style, ax=ax_g)
             
-            # Label Nodes in Tab 2
             nx.draw_networkx_labels(G_ana, pos_final, font_size=8, ax=ax_g)
             
             legend_elements = []
@@ -424,7 +474,6 @@ with tab2:
 with tab3:
     st.markdown("### 🔍 Specific Weight & Cycle Analysis")
     
-    # --- Step 0: Scan Graph ---
     all_edge_keys = set()
     for u, v, data in G_original.edges(data=True):
         all_edge_keys.update(data.keys())
@@ -438,13 +487,11 @@ with tab3:
     with col_ctrl:
         st.subheader("1. Criteria")
         
-        # Attribute Selection
         if available_cols:
             weight_col = st.selectbox("Attribute / Column", available_cols, index=default_ix)
         else:
             weight_col = None
 
-        # Node Selection
         use_specific_node = st.checkbox("Filter: Must pass through Node", value=True)
         all_nodes = sorted(list(G_original.nodes()), key=lambda x: (isinstance(x, str), x))
         
@@ -452,7 +499,6 @@ with tab3:
         if use_specific_node:
             source_u = st.selectbox("Select Through Node", all_nodes)
 
-        # Value Selection
         out_values = set()
         for u, v, data in G_original.edges(data=True):
             val = data.get(weight_col, 1) if weight_col else 1
@@ -568,7 +614,6 @@ with tab3:
 
                 # === Logic B: Filter Cycles (With Length Filter) ===
                 else:
-                    # 1. Get All Valid Cycles
                     valid_cycles, valid_edges, target_edges = get_cycles_general(
                         G_original, target_weight=sel_val, weight_attr=weight_col, 
                         source_node=source_u if use_specific_node else None
@@ -578,11 +623,9 @@ with tab3:
                         st.warning("No cycles found matching criteria.")
                         ax_c.axis('off')
                     else:
-                        # 2. Determine Lengths & Colors
                         cycle_lengths = [len(c) for c in valid_cycles]
                         unique_lengths = sorted(list(set(cycle_lengths)))
                         
-                        # --- NEW: Cycle Length Filter ---
                         selected_lengths = st.multiselect(
                             "Filter by Cycle Length:", 
                             options=unique_lengths, 
@@ -595,11 +638,9 @@ with tab3:
                             st.info("No cycles of selected length.")
                             ax_c.axis('off')
                         else:
-                            # 3. Setup Colors
                             cmap = plt.get_cmap('tab10')
                             len_to_color = {l: cmap(i % 10) for i, l in enumerate(unique_lengths)}
                             
-                            # 4. Build Subgraph
                             filtered_edges = set()
                             for c in filtered_cycles:
                                 for k in range(len(c)):
@@ -612,7 +653,6 @@ with tab3:
                             
                             nx.draw_networkx_nodes(G_sub, pos, node_color='lightgrey', node_size=600, edgecolors='black', ax=ax_c)
                             
-                            # Draw Colored Edges
                             for length in selected_lengths:
                                 color = len_to_color[length]
                                 cycles_of_len = [c for c in filtered_cycles if len(c) == length]
@@ -635,7 +675,6 @@ with tab3:
                             legend_handles = [patches.Patch(color=len_to_color[l], label=f'Length {l}') for l in selected_lengths]
                             ax_c.legend(handles=legend_handles, loc='upper right')
 
-                            # --- Data Lookup Table ---
                             st.divider()
                             st.subheader("📋 Cycle Data Lookup")
                             lookup_data = []
