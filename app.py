@@ -18,77 +18,72 @@ except ImportError:
 
 # --- Core Functions ---
 
-def get_cycles_with_node_weight(G, source_node, target_val, weight_attr='weight'):
+def get_cycles_general(G, target_weight, weight_attr='weight', source_node=None):
     """
-    Optimized: Finds cycles passing through 'source_node' via an edge where 
-    edge[weight_attr] == target_val.
+    Finds cycles based on weight criteria, with optional node filtering.
     """
-    # 1. Comparison Logic for Values (Handles floats vs strings)
+    # Helper: Check if value matches target
     def check_match(val, target):
         try:
             return np.isclose(float(val), float(target))
         except:
             return str(val) == str(target)
 
-    # 2. Identify Valid Neighbors (Next Steps)
-    valid_neighbors = set()
+    # 1. Identify "Target Edges" (Edges that match the weight criteria)
+    target_edges_set = set()
     for u, v, data in G.edges(data=True):
         val = data.get(weight_attr, 1)
         
-        if G.is_directed():
-            if u == source_node:
-                if check_match(val, target_val):
-                    valid_neighbors.add(v)
-        else:
-            # Undirected: check both ways
-            if u == source_node and check_match(val, target_val):
-                valid_neighbors.add(v)
-            elif v == source_node and check_match(val, target_val):
-                valid_neighbors.add(u)
+        # If source_node is specified, edge must connect to/from it
+        is_connected = True
+        if source_node is not None:
+            if G.is_directed():
+                if u != source_node: is_connected = False
+            else:
+                if u != source_node and v != source_node: is_connected = False
+        
+        if is_connected and check_match(val, target_weight):
+            target_edges_set.add((u, v))
+            if not G.is_directed():
+                target_edges_set.add((v, u))
 
-    if not valid_neighbors:
+    if not target_edges_set:
         return [], [], []
 
-    # 3. Cycle Detection
+    # 2. Cycle Detection
     if G.is_directed():
         cycle_gen = nx.simple_cycles(G)
     else:
         cycle_gen = nx.cycle_basis(G)
 
     valid_cycles = []
-    cycle_edges = set()
-    
-    # 4. Optimized Iteration
+    cycle_edges_viz = set()
+
+    # 3. Filter Cycles
     for cycle in cycle_gen:
-        if source_node not in cycle:
+        # Node Filter: If source_node is set, it MUST be in the cycle
+        if source_node is not None and source_node not in cycle:
             continue
 
-        idx = cycle.index(source_node)
-        next_node = cycle[(idx + 1) % len(cycle)]
+        # Weight Filter: Cycle MUST contain at least one edge from target_edges_set
+        has_target_edge = False
+        c_edges = []
         
-        is_valid_cycle = False
-        if next_node in valid_neighbors:
-            is_valid_cycle = True
-        elif not G.is_directed():
-            prev_node = cycle[(idx - 1) % len(cycle)]
-            if prev_node in valid_neighbors:
-                is_valid_cycle = True
-
-        if is_valid_cycle:
+        for k in range(len(cycle)):
+            u, v = cycle[k], cycle[(k + 1) % len(cycle)]
+            c_edges.append((u, v))
+            
+            if (u, v) in target_edges_set:
+                has_target_edge = True
+        
+        if has_target_edge:
             valid_cycles.append(cycle)
-            for k in range(len(cycle)):
-                u, v = cycle[k], cycle[(k + 1) % len(cycle)]
-                cycle_edges.add((u, v))
+            for e in c_edges:
+                cycle_edges_viz.add(e)
                 if not G.is_directed():
-                    cycle_edges.add((v, u))
+                    cycle_edges_viz.add((e[1], e[0]))
 
-    target_edges = []
-    for neighbor in valid_neighbors:
-        target_edges.append((source_node, neighbor))
-        if not G.is_directed():
-            target_edges.append((neighbor, source_node))
-
-    return valid_cycles, list(cycle_edges), target_edges
+    return valid_cycles, list(cycle_edges_viz), list(target_edges_set)
 
 def matrix_to_graph(M, kind="auto"):
     """Converts a matrix M into a NetworkX graph."""
@@ -143,39 +138,64 @@ def matrix_to_graph(M, kind="auto"):
 
     return G, kind
 
-def load_matrix_smart(uploaded_file):
-    """Robustly loads a matrix from CSV/Excel."""
+def process_uploaded_file(uploaded_file):
+    """
+    Separates headers (encoding) from numerical data.
+    Returns: Matrix (list of lists), Encoding (DataFrame), Error (str)
+    """
     uploaded_file.seek(0)
     file_type = uploaded_file.name.split('.')[-1].lower()
     
-    def read_func(file, **kwargs):
+    try:
         if 'csv' in file_type:
-            return pd.read_csv(file, **kwargs)
+            df = pd.read_csv(uploaded_file, index_col=0)
         else:
-            return pd.read_excel(file, **kwargs)
+            df = pd.read_excel(uploaded_file, index_col=0)
+        
+        # 1. Extract Headers/Index for Encoding
+        row_labels = list(df.index)
+        col_labels = list(df.columns)
+        
+        # Create Encoding Map (Assuming square matrix maps 1:1, otherwise list both)
+        # We will create a map: Node ID -> Original Label
+        encoding_data = []
+        for i, label in enumerate(row_labels):
+            encoding_data.append({'Node_ID': i, 'Original_Label': label, 'Type': 'Row'})
+        
+        # If columns are different (non-square), add them too
+        if row_labels != col_labels:
+            for j, label in enumerate(col_labels):
+                 encoding_data.append({'Node_ID': j, 'Original_Label': label, 'Type': 'Column'})
+        
+        encoding_df = pd.DataFrame(encoding_data)
 
-    try:
-        uploaded_file.seek(0)
-        df = read_func(uploaded_file, header=None)
-        df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all(): return df_numeric.values.tolist()
-    except: pass
+        # 2. Process Matrix: Force numeric, fill NaN with 0
+        df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
+        # Check if empty
+        if df_clean.shape[0] == 0:
+            return None, None, "File appears empty."
 
-    try:
-        uploaded_file.seek(0)
-        df = read_func(uploaded_file, index_col=0)
-        df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all() and df_numeric.shape[0] > 0: return df_numeric.values.tolist()
-    except: pass
-    
-    try:
-        uploaded_file.seek(0)
-        df = read_func(uploaded_file, header=0)
-        df_numeric = df.apply(pd.to_numeric, errors='coerce')
-        if df_numeric.notna().all().all(): return df_numeric.values.tolist()
-    except: pass
+        return df_clean.values.tolist(), encoding_df, None
 
-    raise ValueError("Could not parse file as a numeric matrix.")
+    except Exception as e:
+        # Fallback for headless files
+        try:
+            uploaded_file.seek(0)
+            if 'csv' in file_type:
+                df = pd.read_csv(uploaded_file, header=None)
+            else:
+                df = pd.read_excel(uploaded_file, header=None)
+            
+            df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+            
+            # Mock Encoding
+            encoding_data = [{'Node_ID': i, 'Original_Label': f"Node_{i}", 'Type': 'Index'} for i in range(len(df_clean))]
+            encoding_df = pd.DataFrame(encoding_data)
+            
+            return df_clean.values.tolist(), encoding_df, None
+        except Exception as e2:
+            return None, None, str(e2)
 
 # --- UI Setup ---
 
@@ -184,7 +204,7 @@ st.title("Interactive Graph Visualizer")
 
 # --- Sidebar ---
 st.sidebar.header("1. Input Data")
-uploaded_file = st.sidebar.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload CSV/Excel (Stripped Headers)", type=["csv", "xlsx", "xls"])
 st.sidebar.markdown("**OR**")
 matrix_input = st.sidebar.text_area("Paste Python List", value="[[0, 1, 0], [1, 0, 1], [0, 1, 0]]", height=100)
 
@@ -194,10 +214,28 @@ kind_option = st.sidebar.selectbox("Matrix Type", options=["auto", "adjacency", 
 # --- Main Logic ---
 
 matrix_data = None
+encoding_df = None
+
 try:
     if uploaded_file:
-        matrix_data = load_matrix_smart(uploaded_file)
+        matrix_data, encoding_df, error_msg = process_uploaded_file(uploaded_file)
+        if error_msg:
+            st.error(f"Error processing file: {error_msg}")
+            st.stop()
+        
         st.sidebar.success(f"Loaded {len(matrix_data)}x{len(matrix_data[0])} matrix.")
+        
+        # --- NEW: Encoding Download ---
+        if encoding_df is not None:
+            csv_enc = encoding_df.to_csv(index=False).encode('utf-8')
+            st.sidebar.download_button(
+                "📥 Download Encoding Key",
+                csv_enc,
+                "node_encoding.csv",
+                "text/csv",
+                key='download-encoding'
+            )
+
     elif matrix_input:
         matrix_data = ast.literal_eval(matrix_input)
 except Exception as e:
@@ -375,7 +413,7 @@ with tab2:
             plt.close(fig_g)
 
 # ==========================================
-# TAB 3: Cycles & Node-Weight Filter
+# TAB 3: Cycles & Weights
 # ==========================================
 with tab3:
     st.markdown("### 🔍 Specific Weight Analysis")
@@ -394,24 +432,41 @@ with tab3:
     with col_ctrl:
         st.subheader("1. Criteria")
         
+        # 1. Attribute Selection
         if available_cols:
             weight_col = st.selectbox("Attribute / Column", available_cols, index=default_ix)
         else:
             st.warning("No edge attributes found. Using default value 1.")
             weight_col = None
 
+        # 2. Node Selection (Optional)
+        use_specific_node = st.checkbox("Filter by Source Node?", value=True)
         all_nodes = list(G_original.nodes())
-        source_u = st.selectbox("Select Source Node", all_nodes)
+        
+        source_u = None
+        if use_specific_node:
+            source_u = st.selectbox("Select Source Node", all_nodes)
 
+        # 3. Value Selection
+        # Logic: If source selected, show values from source. If not, show all graph values.
         out_values = set()
+        
         for u, v, data in G_original.edges(data=True):
             val = data.get(weight_col, 1) if weight_col else 1
-            if G_original.is_directed():
-                if u == source_u:
-                    out_values.add(val)
+            
+            should_add = False
+            if use_specific_node:
+                # Add only if connected to source
+                if G_original.is_directed():
+                    if u == source_u: should_add = True
+                else:
+                    if u == source_u or v == source_u: should_add = True
             else:
-                if u == source_u or v == source_u:
-                    out_values.add(val)
+                # Add all values in graph
+                should_add = True
+
+            if should_add:
+                out_values.add(val)
 
         try:
             sorted_vals = sorted(list(out_values), key=lambda x: float(x))
@@ -419,7 +474,10 @@ with tab3:
             sorted_vals = sorted(list(out_values), key=lambda x: str(x))
         
         if not sorted_vals:
-            st.warning("Node has no connecting edges.")
+            if use_specific_node:
+                st.warning("Node has no edges.")
+            else:
+                st.warning("Graph has no edges.")
             sel_val = None
         else:
             sel_val = st.selectbox(f"Select Value ({weight_col})", sorted_vals)
@@ -432,7 +490,7 @@ with tab3:
         layout_algo = st.selectbox("Layout", 
                                    ["spring", "circular", "kamada_kawai", "shell", "bipartite", "planar"])
         
-        view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles)"])
+        view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles Only)"])
 
     # --- Helper: Layout ---
     def get_layout(graph_obj, algo):
@@ -461,13 +519,13 @@ with tab3:
     # --- 2. Visualization Area ---
     with col_viz:
         if sel_val is None:
-            st.info("Select a node with edges to begin.")
+            st.info("No data to visualize based on current selection.")
         else:
             try:
                 fig_c, ax_c = plt.subplots(figsize=(8, 8))
                 
-                # FIX: Explicit string for connectionstyle (rad=0.0 is straight)
                 use_arrows = bool(G_original.is_directed())
+                # Fix: explicit string for connectionstyle
                 conn_style = "arc3,rad=0.1" if use_arrows else "arc3,rad=0.0"
 
                 # --- Logic A: Full Graph Highlight ---
@@ -481,21 +539,26 @@ with tab3:
                     
                     for u, v, data in G_original.edges(data=True):
                         w = data.get(weight_col, 1)
-                        is_match = False
-                        is_connected = False
+                        is_match = is_val_match(w, sel_val)
                         
-                        if G_original.is_directed():
-                            if u == source_u: is_connected = True
+                        # If filtering by node, only highlight edges touching that node
+                        if use_specific_node:
+                            is_connected = False
+                            if G_original.is_directed():
+                                if u == source_u: is_connected = True
+                            else:
+                                if u == source_u or v == source_u: is_connected = True
+                            
+                            if is_connected and is_match:
+                                e_target.append((u, v))
+                            else:
+                                e_other.append((u, v))
                         else:
-                            if u == source_u or v == source_u: is_connected = True
-
-                        if is_connected and is_val_match(w, sel_val):
-                            is_match = True
-                        
-                        if is_match:
-                            e_target.append((u, v))
-                        else:
-                            e_other.append((u, v))
+                            # Global mode: Highlight ALL edges with that value
+                            if is_match:
+                                e_target.append((u, v))
+                            else:
+                                e_other.append((u, v))
 
                     if e_other:
                         nx.draw_networkx_edges(G_original, pos, edgelist=e_other, edge_color='#B0B0B0', 
@@ -514,16 +577,22 @@ with tab3:
 
                 # --- Logic B: Filter Cycles ---
                 else:
-                    valid_cycles, valid_edges, target_edges = get_cycles_with_node_weight(
-                        G_original, source_u, sel_val, weight_attr=weight_col
+                    # Use general cycle finder
+                    valid_cycles, valid_edges, target_edges = get_cycles_general(
+                        G_original, 
+                        target_weight=sel_val, 
+                        weight_attr=weight_col, 
+                        source_node=source_u if use_specific_node else None
                     )
                     
+                    filter_desc = f"passing through {source_u}" if use_specific_node else "in the graph"
+                    
                     if not valid_cycles:
-                        st.warning(f"No cycles found passing through {source_u} with {weight_col}={sel_val}.")
+                        st.warning(f"No cycles found {filter_desc} with {weight_col}={sel_val}.")
                         ax_c.text(0.5, 0.5, "No Cycles Found", ha='center', va='center', transform=ax_c.transAxes)
                         ax_c.axis('off')
                     else:
-                        st.success(f"Found {len(valid_cycles)} cycles.")
+                        st.success(f"Found {len(valid_cycles)} cycles {filter_desc}.")
                         
                         G_sub = G_original.edge_subgraph(valid_edges).copy()
                         pos = get_layout(G_sub, layout_algo)
@@ -534,11 +603,13 @@ with tab3:
                         e_normal = []
                         
                         target_set = set(target_edges)
+                        # Ensure set covers both directions for checking
                         if not G_original.is_directed():
-                            for u, v in list(target_set):
+                             for u, v in list(target_set):
                                 target_set.add((v, u))
-                        
+
                         for u, v in G_sub.edges():
+                            # Logic: Is this edge one of the 'special' value edges?
                             if (u, v) in target_set:
                                 e_trigger.append((u, v))
                             else:
