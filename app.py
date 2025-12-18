@@ -8,6 +8,7 @@ import ast
 import pandas as pd
 import io
 import scipy
+import json
 
 # --- Helper: Check for Pydot (Graphviz Export) ---
 try:
@@ -19,9 +20,7 @@ except ImportError:
 # --- Core Functions ---
 
 def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=None):
-    """
-    Finds cycles based on weight criteria, with optional node filtering.
-    """
+    """Finds cycles based on weight criteria, with optional node filtering."""
     def check_match(val, target):
         if target is None: return True 
         try:
@@ -29,11 +28,9 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
         except:
             return str(val) == str(target)
 
-    # 1. Identify "Target Edges"
     target_edges_set = set()
     for u, v, data in G.edges(data=True):
         val = data.get(weight_attr, 1)
-        
         is_connected = True
         if source_node is not None:
             if G.is_directed():
@@ -49,7 +46,6 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
     if target_weight is not None and not target_edges_set:
         return [], [], []
 
-    # 2. Cycle Detection
     if G.is_directed():
         cycle_gen = nx.simple_cycles(G)
     else:
@@ -57,8 +53,6 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
 
     valid_cycles = []
     cycle_edges_viz = set()
-
-    # 3. Filter Cycles
     max_cycles = 5000 
     count = 0
 
@@ -68,11 +62,9 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
 
         has_target_edge = False
         c_edges = []
-        
         for k in range(len(cycle)):
             u, v = cycle[k], cycle[(k + 1) % len(cycle)]
             c_edges.append((u, v))
-            
             if target_weight is None or (u, v) in target_edges_set:
                 has_target_edge = True
         
@@ -82,10 +74,8 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
                 cycle_edges_viz.add(e)
                 if not G.is_directed():
                     cycle_edges_viz.add((e[1], e[0]))
-            
             count += 1
-            if count >= max_cycles:
-                break
+            if count >= max_cycles: break
 
     return valid_cycles, list(cycle_edges_viz), list(target_edges_set)
 
@@ -142,51 +132,107 @@ def matrix_to_graph(M, kind="auto"):
 
     return G, kind
 
-def process_uploaded_file(uploaded_file):
-    """Separates headers (encoding) from numerical data."""
-    uploaded_file.seek(0)
-    file_type = uploaded_file.name.split('.')[-1].lower()
-    
-    try:
-        if 'csv' in file_type:
-            df = pd.read_csv(uploaded_file, index_col=0)
+# --- Data Processing Logic (User's Custom Encoding) ---
+
+def apply_custom_encoding(df):
+    """
+    Applies the specific logic:
+    1. First column becomes Index (Labels).
+    2. Remaining columns are encoded:
+       - Unique sorted values -> 1, 2, 3...
+       - NaN/None -> 0
+    Returns: Numeric Matrix (List of Lists), Legends (DataFrame for export)
+    """
+    # 1. Set first column as index (Labels)
+    # If the user already provided an index in read_csv, this might be redundant but safe
+    if df.index.name is None and len(df.columns) > 1:
+        # Assume first column is the label if index is generic
+        first_col = df.columns[0]
+        df = df.set_index(first_col)
+
+    encoded_df = df.copy()
+    legends_list = []
+
+    # 2. Define Mapping Logic
+    def get_mapping(series):
+        valid_values = sorted(series.dropna().unique())
+        mapping = {val: i+1 for i, val in enumerate(valid_values)}
+        mapping[np.nan] = 0
+        return mapping
+
+    # 3. Apply to all columns
+    for col in df.columns:
+        # Check if column is numeric. If purely numeric, fillna(0) and skip mapping.
+        # If mixed or string, apply mapping.
+        if pd.api.types.is_numeric_dtype(df[col]):
+            encoded_df[col] = df[col].fillna(0)
+            # No legend needed for pure numbers
         else:
-            df = pd.read_excel(uploaded_file, index_col=0)
-        
-        row_labels = list(df.index)
-        col_labels = list(df.columns)
-        
-        encoding_data = []
-        for i, label in enumerate(row_labels):
-            encoding_data.append({'Node_ID': i, 'Original_Label': label, 'Type': 'Row'})
-        
-        if row_labels != col_labels:
-            for j, label in enumerate(col_labels):
-                 encoding_data.append({'Node_ID': j, 'Original_Label': label, 'Type': 'Column'})
-        
-        encoding_df = pd.DataFrame(encoding_data)
+            mapping = get_mapping(df[col])
+            encoded_df[col] = df[col].map(mapping).fillna(0).astype(int)
+            
+            # Store legend for this column
+            for k, v in mapping.items():
+                if k is not np.nan:
+                    legends_list.append({'Column': col, 'Value': k, 'Encoded_ID': v})
 
-        df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
-        if df_clean.shape[0] == 0: return None, None, "File appears empty."
+    legends_df = pd.DataFrame(legends_list) if legends_list else None
+    
+    # Return matrix and legends
+    return encoded_df.values.tolist(), legends_df
 
-        return df_clean.values.tolist(), encoding_df, None
+def process_input_data(data_source, source_type="file"):
+    """
+    Universal processor for files or text input.
+    """
+    try:
+        df = None
+        # A. Load Data into DataFrame
+        if source_type == "file":
+            data_source.seek(0)
+            if 'csv' in data_source.name.lower():
+                # Try reading with header, if fails (rare), read without
+                df = pd.read_csv(data_source)
+            else:
+                df = pd.read_excel(data_source)
+        
+        elif source_type == "text":
+            # Parsing complex python objects (list of dicts, or dict of lists)
+            try:
+                # 1. Try parsing as JSON-like structure or List of Lists
+                parsed = ast.literal_eval(data_source)
+                df = pd.DataFrame(parsed)
+            except:
+                # 2. Try parsing as JSON directly
+                try:
+                    parsed = json.loads(data_source)
+                    df = pd.DataFrame(parsed)
+                except:
+                    return None, None, "Could not parse text input. Ensure it's a valid Python list or Dictionary."
+
+        # B. Check Content Type (Numeric vs Categorical)
+        # We try to coerce to numeric. If it fails significantly, we treat as Categorical.
+        df_numeric_check = df.apply(pd.to_numeric, errors='coerce')
+        
+        # If > 50% of data becomes NaN when coerced, assume it's Categorical and needs Encoding
+        total_cells = df.size
+        nan_count = df_numeric_check.isna().sum().sum()
+        
+        if nan_count > (total_cells * 0.5):
+            # >> Apply User's Categorical Encoding <<
+            return apply_custom_encoding(df)
+        else:
+            # >> Treat as Pure Matrix (Numeric) <<
+            # Fill NaNs with 0
+            df_final = df_numeric_check.fillna(0)
+            
+            # Create a simple Index mapping legend (Row 0 -> Node 0)
+            rows = df.index.tolist()
+            legend_data = [{'Column': 'Index', 'Value': str(r), 'Encoded_ID': i} for i, r in enumerate(rows)]
+            return df_final.values.tolist(), pd.DataFrame(legend_data), None
 
     except Exception as e:
-        try:
-            uploaded_file.seek(0)
-            if 'csv' in file_type:
-                df = pd.read_csv(uploaded_file, header=None)
-            else:
-                df = pd.read_excel(uploaded_file, header=None)
-            
-            df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
-            
-            encoding_data = [{'Node_ID': i, 'Original_Label': f"Node_{i}", 'Type': 'Index'} for i in range(len(df_clean))]
-            encoding_df = pd.DataFrame(encoding_data)
-            
-            return df_clean.values.tolist(), encoding_df, None
-        except Exception as e2:
-            return None, None, str(e2)
+        return None, None, str(e)
 
 # --- UI Setup ---
 
@@ -195,9 +241,16 @@ st.title("Interactive Graph Visualizer")
 
 # --- Sidebar ---
 st.sidebar.header("1. Input Data")
-uploaded_file = st.sidebar.file_uploader("Upload CSV/Excel (Stripped Headers)", type=["csv", "xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
 st.sidebar.markdown("**OR**")
-matrix_input = st.sidebar.text_area("Paste Python List", value="[[0, 1, 0], [1, 0, 1], [0, 1, 0]]", height=100)
+
+default_text = """{
+    'Person': ['Alice', 'Bob', 'Charlie', 'David', 'Eve'],
+    'Department': ['Engineering', 'Marketing', 'Engineering', 'HR', None],
+    'Project': ['Alpha', None, 'Beta', 'Alpha', 'Beta'],
+    'Role': ['Dev', 'Lead', 'Dev', 'Manager', 'Analyst']
+}"""
+matrix_input = st.sidebar.text_area("Paste Data (List/Dict)", value=default_text, height=150)
 
 st.sidebar.header("2. Logic")
 kind_option = st.sidebar.selectbox("Matrix Type", options=["auto", "adjacency", "incidence", "biadjacency"])
@@ -206,21 +259,32 @@ kind_option = st.sidebar.selectbox("Matrix Type", options=["auto", "adjacency", 
 
 matrix_data = None
 encoding_df = None
+error_msg = None
 
 try:
     if uploaded_file:
-        matrix_data, encoding_df, error_msg = process_uploaded_file(uploaded_file)
-        if error_msg:
-            st.error(f"Error processing file: {error_msg}")
-            st.stop()
-        st.sidebar.success(f"Loaded {len(matrix_data)}x{len(matrix_data[0])} matrix.")
-        if encoding_df is not None:
-            csv_enc = encoding_df.to_csv(index=False).encode('utf-8')
-            st.sidebar.download_button("📥 Download Encoding Key", csv_enc, "node_encoding.csv", "text/csv")
+        matrix_data, encoding_df, error_msg = process_input_data(uploaded_file, source_type="file")
     elif matrix_input:
-        matrix_data = ast.literal_eval(matrix_input)
+        matrix_data, encoding_df, error_msg = process_input_data(matrix_input, source_type="text")
+        
+    if error_msg:
+        st.error(f"Error processing data: {error_msg}")
+        st.stop()
+        
+    if matrix_data:
+        st.sidebar.success(f"Loaded {len(matrix_data)}x{len(matrix_data[0])} matrix.")
+        
+        # Download Encoding Key
+        if encoding_df is not None and not encoding_df.empty:
+            csv_enc = encoding_df.to_csv(index=False).encode('utf-8')
+            st.sidebar.download_button(
+                "📥 Download Encoding Legends",
+                csv_enc,
+                "encoding_legends.csv",
+                "text/csv"
+            )
 except Exception as e:
-    st.error(f"Data Load Error: {e}")
+    st.error(f"Critical Error: {e}")
     st.stop()
 
 if not matrix_data:
@@ -266,22 +330,15 @@ with tab1:
                     pos = nx.spring_layout(G_original, seed=42, k=k_val, iterations=50)
 
                 is_directed = isinstance(G_original, nx.DiGraph)
-                
-                # FIX: connectionstyle must be a valid string even if undirected
                 conn_style = "arc3,rad=0.1" if is_directed else "arc3,rad=0.0"
                 
-                # Draw Nodes
                 nx.draw_networkx_nodes(G_original, pos, node_size=user_node_size, node_color='lightblue', ax=ax)
-                
-                # Draw Edges (with curve if directed)
                 nx.draw_networkx_edges(G_original, pos, arrows=is_directed, alpha=0.5, 
                                        connectionstyle=conn_style, ax=ax)
                 
-                # Draw Node Labels
                 if user_font_size > 0:
                     nx.draw_networkx_labels(G_original, pos, font_size=user_font_size, ax=ax)
                 
-                # Draw Edge Weights (Small Font)
                 if show_weights_t1:
                     edge_labels = nx.get_edge_attributes(G_original, 'weight')
                     fmt_labels = {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in edge_labels.items()}
@@ -292,7 +349,6 @@ with tab1:
                 st.pyplot(fig)
                 plt.close(fig)
                 
-                # Downloads
                 c1, c2 = st.columns(2)
                 with c1:
                     buf = io.BytesIO()
@@ -329,56 +385,41 @@ with tab2:
 
     if st.button("Analyze Cohorts", type="primary", key="btn_frob"):
         
-        # --- NEW LOGIC: Handle Biadjacency -> Adjacency Conversion ---
         current_target_kind = frob_mode if frob_mode != "Same as Sidebar" else detected_kind
 
         if current_target_kind == "biadjacency":
-            st.info("🔄 Treating Biadjacency Matrix as Adjacency for Cohort Analysis (creating equivalent graph).")
-            
-            # Check dimensions to decide strategy
+            st.info("🔄 Treating Biadjacency Matrix as Adjacency for Cohort Analysis.")
             M = np.array(matrix_data)
             rows, cols = M.shape
             
             if rows == cols:
-                # Square Matrix: Treat directly as Adjacency (Node i -> Node j)
                 try:
                     G_ana, _ = matrix_to_graph(matrix_data, kind="adjacency")
                 except Exception as e:
                     st.error(f"Conversion failed: {e}")
                     st.stop()
             else:
-                # Rectangular Matrix: Create Bipartite Adjacency Matrix
-                # Block Matrix: [[0, M], [0, 0]] (Directed U->V) or [[0, M], [M.T, 0]] (Undirected)
-                # Frobenius usually requires square, so we build the square bipartite adjacency.
                 st.warning(f"Matrix is rectangular ({rows}x{cols}). Building Bipartite Adjacency Graph.")
-                
-                # Construct Bipartite Graph explicitly
                 G_ana = nx.DiGraph()
-                # Row nodes 0..rows-1, Col nodes rows..rows+cols-1
                 G_ana.add_nodes_from(range(rows + cols))
-                
                 for r in range(rows):
                     for c in range(cols):
                         val = M[r][c]
                         if val != 0:
-                            # Edge from Row Node r -> Col Node (rows + c)
                             G_ana.add_edge(r, rows + c, weight=val)
 
         elif frob_mode != "Same as Sidebar":
-            # Manual override (e.g., forcing incidence)
             try:
                 G_ana, _ = matrix_to_graph(matrix_data, kind=frob_mode)
             except Exception as e:
                 st.error(f"Error rebuilding graph as {frob_mode}: {e}")
                 st.stop()
         else:
-            # Default behavior (use globally detected graph)
             if detected_kind == "biadjacency" or not G_original.is_directed():
                  G_ana = G_original.to_directed()
             else:
                  G_ana = G_original.copy()
 
-        # --- Proceed with Frobenius Analysis ---
         try:
             C = nx.condensation(G_ana) 
         except Exception as e:
@@ -415,7 +456,6 @@ with tab2:
 
         col_f1, col_f2 = st.columns(2)
 
-        # --- 1. Frobenius Matrix ---
         with col_f1:
             st.subheader("1. Frobenius Matrix")
             fig_m, ax_m = plt.subplots(figsize=(8, 8))
@@ -434,7 +474,6 @@ with tab2:
             st.pyplot(fig_m)
             plt.close(fig_m)
 
-        # --- 2. Cohort Graph ---
         with col_f2:
             st.subheader("2. Cohort Graph")
             cmap = plt.get_cmap('tab20')
@@ -481,7 +520,6 @@ with tab3:
     available_cols = list(all_edge_keys)
     default_ix = available_cols.index('weight') if 'weight' in available_cols else (0 if available_cols else None)
 
-    # --- 1. Selection Controls ---
     col_ctrl, col_viz = st.columns([1, 3])
 
     with col_ctrl:
@@ -534,7 +572,6 @@ with tab3:
         
         view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles Only)"])
 
-    # --- Helper: Layout ---
     def get_layout(graph_obj, algo):
         if graph_obj.number_of_nodes() == 0: return {}
         try:
@@ -569,7 +606,6 @@ with tab3:
         except:
             return str(d_val) == str(t_val)
 
-    # --- 2. Visualization Area ---
     with col_viz:
         if sel_val is None:
             st.info("No data.")
@@ -579,7 +615,6 @@ with tab3:
                 use_arrows = bool(G_original.is_directed())
                 conn_style = "arc3,rad=0.1" if use_arrows else "arc3,rad=0.0"
 
-                # === Logic A: Highlight (Full Graph) ===
                 if view_mode == "Highlight (Full)":
                     pos = get_layout(G_original, layout_algo)
                     nx.draw_networkx_nodes(G_original, pos, node_color='#E0E0E0', node_size=500, ax=ax_c)
@@ -612,7 +647,6 @@ with tab3:
                          edge_lbls = {e: G_original.edges[e].get(weight_col, '') for e in G_original.edges}
                          nx.draw_networkx_edge_labels(G_original, pos, edge_labels=edge_lbls, font_size=8, label_pos=0.5, ax=ax_c)
 
-                # === Logic B: Filter Cycles (With Length Filter) ===
                 else:
                     valid_cycles, valid_edges, target_edges = get_cycles_general(
                         G_original, target_weight=sel_val, weight_attr=weight_col, 
