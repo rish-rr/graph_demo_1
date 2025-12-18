@@ -21,20 +21,19 @@ except ImportError:
 def get_cycles_general(G, target_weight, weight_attr='weight', source_node=None):
     """
     Finds cycles based on weight criteria, with optional node filtering.
+    Returns cycles grouped by length.
     """
-    # Helper: Check if value matches target
     def check_match(val, target):
         try:
             return np.isclose(float(val), float(target))
         except:
             return str(val) == str(target)
 
-    # 1. Identify "Target Edges" (Edges that match the weight criteria)
+    # 1. Identify "Target Edges"
     target_edges_set = set()
     for u, v, data in G.edges(data=True):
         val = data.get(weight_attr, 1)
         
-        # If source_node is specified, edge must connect to/from it
         is_connected = True
         if source_node is not None:
             if G.is_directed():
@@ -61,11 +60,9 @@ def get_cycles_general(G, target_weight, weight_attr='weight', source_node=None)
 
     # 3. Filter Cycles
     for cycle in cycle_gen:
-        # Node Filter: If source_node is set, it MUST be in the cycle
         if source_node is not None and source_node not in cycle:
             continue
 
-        # Weight Filter: Cycle MUST contain at least one edge from target_edges_set
         has_target_edge = False
         c_edges = []
         
@@ -141,7 +138,6 @@ def matrix_to_graph(M, kind="auto"):
 def process_uploaded_file(uploaded_file):
     """
     Separates headers (encoding) from numerical data.
-    Returns: Matrix (list of lists), Encoding (DataFrame), Error (str)
     """
     uploaded_file.seek(0)
     file_type = uploaded_file.name.split('.')[-1].lower()
@@ -152,34 +148,27 @@ def process_uploaded_file(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file, index_col=0)
         
-        # 1. Extract Headers/Index for Encoding
         row_labels = list(df.index)
         col_labels = list(df.columns)
         
-        # Create Encoding Map (Assuming square matrix maps 1:1, otherwise list both)
-        # We will create a map: Node ID -> Original Label
         encoding_data = []
         for i, label in enumerate(row_labels):
             encoding_data.append({'Node_ID': i, 'Original_Label': label, 'Type': 'Row'})
         
-        # If columns are different (non-square), add them too
         if row_labels != col_labels:
             for j, label in enumerate(col_labels):
                  encoding_data.append({'Node_ID': j, 'Original_Label': label, 'Type': 'Column'})
         
         encoding_df = pd.DataFrame(encoding_data)
 
-        # 2. Process Matrix: Force numeric, fill NaN with 0
         df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
         
-        # Check if empty
         if df_clean.shape[0] == 0:
             return None, None, "File appears empty."
 
         return df_clean.values.tolist(), encoding_df, None
 
     except Exception as e:
-        # Fallback for headless files
         try:
             uploaded_file.seek(0)
             if 'csv' in file_type:
@@ -189,7 +178,6 @@ def process_uploaded_file(uploaded_file):
             
             df_clean = df.apply(pd.to_numeric, errors='coerce').fillna(0)
             
-            # Mock Encoding
             encoding_data = [{'Node_ID': i, 'Original_Label': f"Node_{i}", 'Type': 'Index'} for i in range(len(df_clean))]
             encoding_df = pd.DataFrame(encoding_data)
             
@@ -225,7 +213,6 @@ try:
         
         st.sidebar.success(f"Loaded {len(matrix_data)}x{len(matrix_data[0])} matrix.")
         
-        # --- NEW: Encoding Download ---
         if encoding_df is not None:
             csv_enc = encoding_df.to_csv(index=False).encode('utf-8')
             st.sidebar.download_button(
@@ -265,6 +252,9 @@ with tab1:
         user_node_size = col_s2.slider("Node Size", 10, 1000, 300, key="t1_node")
         user_font_size = col_s3.slider("Font Size", 0, 24, 8, key="t1_font")
         user_dpi = col_s4.number_input("DPI", value=150, key="t1_dpi")
+        
+        # Toggle Weight Labels
+        show_weights_t1 = st.checkbox("Show Edge Weights", value=True, key="t1_weights")
 
     if st.button("Render Standard Graph", type="primary", key="btn_std"):
         num_nodes = G_original.number_of_nodes()
@@ -288,11 +278,15 @@ with tab1:
                 if user_font_size > 0:
                     nx.draw_networkx_labels(G_original, pos, font_size=user_font_size, ax=ax)
                 
+                if show_weights_t1:
+                    edge_labels = nx.get_edge_attributes(G_original, 'weight')
+                    formatted_labels = {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in edge_labels.items()}
+                    nx.draw_networkx_edge_labels(G_original, pos, edge_labels=formatted_labels, ax=ax)
+                
                 ax.axis('off')
                 st.pyplot(fig)
                 plt.close(fig)
                 
-                # --- DOWNLOADS ---
                 c1, c2 = st.columns(2)
                 with c1:
                     buf = io.BytesIO()
@@ -416,9 +410,9 @@ with tab2:
 # TAB 3: Cycles & Weights
 # ==========================================
 with tab3:
-    st.markdown("### 🔍 Specific Weight Analysis")
+    st.markdown("### 🔍 Specific Weight & Cycle Analysis")
     
-    # --- Step 0: Scan Graph for Available Attributes ---
+    # --- Step 0: Scan Graph ---
     all_edge_keys = set()
     for u, v, data in G_original.edges(data=True):
         all_edge_keys.update(data.keys())
@@ -432,39 +426,34 @@ with tab3:
     with col_ctrl:
         st.subheader("1. Criteria")
         
-        # 1. Attribute Selection
+        # Attribute Selection
         if available_cols:
             weight_col = st.selectbox("Attribute / Column", available_cols, index=default_ix)
         else:
             st.warning("No edge attributes found. Using default value 1.")
             weight_col = None
 
-        # 2. Node Selection (Optional)
+        # Node Selection (Sorted)
         use_specific_node = st.checkbox("Filter by Source Node?", value=True)
-        all_nodes = list(G_original.nodes())
+        # Sort nodes naturally (handles numbers vs strings)
+        all_nodes = sorted(list(G_original.nodes()), key=lambda x: (isinstance(x, str), x))
         
         source_u = None
         if use_specific_node:
             source_u = st.selectbox("Select Source Node", all_nodes)
 
-        # 3. Value Selection
-        # Logic: If source selected, show values from source. If not, show all graph values.
+        # Value Selection
         out_values = set()
-        
         for u, v, data in G_original.edges(data=True):
             val = data.get(weight_col, 1) if weight_col else 1
-            
             should_add = False
             if use_specific_node:
-                # Add only if connected to source
                 if G_original.is_directed():
                     if u == source_u: should_add = True
                 else:
                     if u == source_u or v == source_u: should_add = True
             else:
-                # Add all values in graph
                 should_add = True
-
             if should_add:
                 out_values.add(val)
 
@@ -484,7 +473,8 @@ with tab3:
         
         st.divider()
         st.subheader("2. Appearance")
-        show_labels = st.checkbox("Show Labels", value=True)
+        show_labels = st.checkbox("Show Node Labels", value=True)
+        show_weights_t3 = st.checkbox("Show Edge Weights", value=True, key="t3_weights")
         label_size = st.slider("Label Size", 5, 20, 10, disabled=not show_labels)
         
         layout_algo = st.selectbox("Layout", 
@@ -492,20 +482,48 @@ with tab3:
         
         view_mode = st.radio("Mode", ["Highlight (Full)", "Filter (Cycles Only)"])
 
-    # --- Helper: Layout ---
+    # --- Helper: Layout (Modified for Ordering) ---
     def get_layout(graph_obj, algo):
         if graph_obj.number_of_nodes() == 0: return {}
+        
+        # Determine sorted node order for deterministic layouts
         try:
-            if algo == "spring": return nx.spring_layout(graph_obj, seed=42, k=0.5)
-            elif algo == "circular": return nx.circular_layout(graph_obj)
-            elif algo == "kamada_kawai": return nx.kamada_kawai_layout(graph_obj)
-            elif algo == "shell": return nx.shell_layout(graph_obj)
-            elif algo == "planar": return nx.planar_layout(graph_obj)
+            sorted_nodes = sorted(list(graph_obj.nodes()), key=lambda x: (isinstance(x, str), x))
+        except:
+            sorted_nodes = list(graph_obj.nodes())
+
+        try:
+            if algo == "spring": 
+                return nx.spring_layout(graph_obj, seed=42, k=0.5)
+            
+            elif algo == "circular": 
+                # Manually compute circular layout to strictly follow sorted order
+                pos = {}
+                if len(sorted_nodes) > 0:
+                    angle_step = 2 * np.pi / len(sorted_nodes)
+                    for i, node in enumerate(sorted_nodes):
+                        theta = i * angle_step
+                        # Start from top (pi/2) and go clockwise
+                        theta_adj = np.pi/2 - theta 
+                        pos[node] = np.array([np.cos(theta_adj), np.sin(theta_adj)])
+                return pos
+            
+            elif algo == "kamada_kawai": 
+                return nx.kamada_kawai_layout(graph_obj)
+            
+            elif algo == "shell": 
+                # Pass sorted list as the shell
+                return nx.shell_layout(graph_obj, nlist=[sorted_nodes])
+            
+            elif algo == "planar": 
+                return nx.planar_layout(graph_obj)
+            
             elif algo == "bipartite":
                 U_nodes = {n for n, d in graph_obj.nodes(data=True) if d.get("bipartite") == 0}
                 if not U_nodes: 
                     U_nodes, _ = nx.bipartite.sets(graph_obj)
-                return nx.bipartite_layout(graph_obj, U_nodes)
+                # Sort bipartite layers too
+                return nx.bipartite_layout(graph_obj, sorted(list(U_nodes), key=lambda x: (isinstance(x, str), x)))
         except:
             return nx.spring_layout(graph_obj, seed=42)
         return nx.spring_layout(graph_obj, seed=42)
@@ -525,7 +543,6 @@ with tab3:
                 fig_c, ax_c = plt.subplots(figsize=(8, 8))
                 
                 use_arrows = bool(G_original.is_directed())
-                # Fix: explicit string for connectionstyle
                 conn_style = "arc3,rad=0.1" if use_arrows else "arc3,rad=0.0"
 
                 # --- Logic A: Full Graph Highlight ---
@@ -541,7 +558,6 @@ with tab3:
                         w = data.get(weight_col, 1)
                         is_match = is_val_match(w, sel_val)
                         
-                        # If filtering by node, only highlight edges touching that node
                         if use_specific_node:
                             is_connected = False
                             if G_original.is_directed():
@@ -554,7 +570,6 @@ with tab3:
                             else:
                                 e_other.append((u, v))
                         else:
-                            # Global mode: Highlight ALL edges with that value
                             if is_match:
                                 e_target.append((u, v))
                             else:
@@ -568,16 +583,17 @@ with tab3:
                                                width=2.5, arrows=use_arrows, connectionstyle=conn_style, ax=ax_c)
                     
                     if show_labels:
-                        edge_lbls = {}
-                        if weight_col:
-                            for u, v, d in G_original.edges(data=True):
-                                edge_lbls[(u,v)] = d.get(weight_col, '')
-                            nx.draw_networkx_edge_labels(G_original, pos, edge_labels=edge_lbls, font_size=8, ax=ax_c)
                         nx.draw_networkx_labels(G_original, pos, font_size=label_size, ax=ax_c)
+                    
+                    if show_weights_t3:
+                         edge_lbls = {}
+                         if weight_col:
+                             for u, v, d in G_original.edges(data=True):
+                                 edge_lbls[(u,v)] = d.get(weight_col, '')
+                             nx.draw_networkx_edge_labels(G_original, pos, edge_labels=edge_lbls, font_size=8, ax=ax_c)
 
-                # --- Logic B: Filter Cycles ---
+                # --- Logic B: Filter Cycles (With Length Coloring & Lookup) ---
                 else:
-                    # Use general cycle finder
                     valid_cycles, valid_edges, target_edges = get_cycles_general(
                         G_original, 
                         target_weight=sel_val, 
@@ -597,41 +613,78 @@ with tab3:
                         G_sub = G_original.edge_subgraph(valid_edges).copy()
                         pos = get_layout(G_sub, layout_algo)
                         
-                        nx.draw_networkx_nodes(G_sub, pos, node_color='#FFD700', node_size=600, edgecolors='black', ax=ax_c)
+                        # Determine lengths & Colors
+                        cycle_lengths = [len(c) for c in valid_cycles]
+                        unique_lengths = sorted(list(set(cycle_lengths)))
+                        cmap = plt.get_cmap('tab10')
+                        len_to_color = {l: cmap(i % 10) for i, l in enumerate(unique_lengths)}
                         
-                        e_trigger = []
-                        e_normal = []
+                        # Draw Nodes
+                        nx.draw_networkx_nodes(G_sub, pos, node_color='lightgrey', node_size=600, edgecolors='black', ax=ax_c)
                         
-                        target_set = set(target_edges)
-                        # Ensure set covers both directions for checking
-                        if not G_original.is_directed():
-                             for u, v in list(target_set):
-                                target_set.add((v, u))
-
-                        for u, v in G_sub.edges():
-                            # Logic: Is this edge one of the 'special' value edges?
-                            if (u, v) in target_set:
-                                e_trigger.append((u, v))
-                            else:
-                                e_normal.append((u, v))
-
-                        if e_normal:
-                            nx.draw_networkx_edges(G_sub, pos, edgelist=e_normal, edge_color='black', 
-                                                   style='dashed', width=1, arrows=use_arrows, connectionstyle=conn_style, ax=ax_c)
+                        # Draw Edges (Base)
+                        nx.draw_networkx_edges(G_sub, pos, edge_color='black', style='dashed', 
+                                               width=1, arrows=use_arrows, connectionstyle=conn_style, ax=ax_c)
                         
-                        if e_trigger:
-                            nx.draw_networkx_edges(G_sub, pos, edgelist=e_trigger, edge_color='#FF4B4B', 
-                                                   width=3, arrows=use_arrows, connectionstyle=conn_style, ax=ax_c)
+                        # Draw Colored Cycle Edges
+                        for cycle in valid_cycles:
+                            length = len(cycle)
+                            color = len_to_color[length]
+                            c_edges = []
+                            for k in range(len(cycle)):
+                                u_c, v_c = cycle[k], cycle[(k + 1) % len(cycle)]
+                                c_edges.append((u_c, v_c))
+                            
+                            nx.draw_networkx_edges(G_sub, pos, edgelist=c_edges, edge_color=[color], 
+                                                   width=2.5, arrows=use_arrows, connectionstyle=conn_style, ax=ax_c)
 
                         if show_labels:
                             nx.draw_networkx_labels(G_sub, pos, font_size=label_size, font_weight='bold', ax=ax_c)
-                            if weight_col:
-                                edge_lbls = {e: G_sub.edges[e].get(weight_col, '') for e in G_sub.edges}
-                                nx.draw_networkx_edge_labels(G_sub, pos, edge_labels=edge_lbls, font_color='red', font_size=8, ax=ax_c)
+                        
+                        if show_weights_t3 and weight_col:
+                            edge_lbls = {e: G_sub.edges[e].get(weight_col, '') for e in G_sub.edges}
+                            nx.draw_networkx_edge_labels(G_sub, pos, edge_labels=edge_lbls, font_color='black', font_size=8, ax=ax_c)
+                        
+                        # Legend
+                        legend_handles = []
+                        for l, c in len_to_color.items():
+                            legend_handles.append(patches.Patch(color=c, label=f'Length {l}'))
+                        ax_c.legend(handles=legend_handles, loc='upper right')
 
                 ax_c.axis('off')
                 st.pyplot(fig_c)
                 plt.close(fig_c)
+
+                # --- Matrix/Data Lookup ---
+                if view_mode == "Filter (Cycles Only)" and 'valid_cycles' in locals() and valid_cycles:
+                    st.divider()
+                    st.subheader("📋 Cycle Data Lookup")
+                    
+                    lookup_data = []
+                    for i, cycle in enumerate(valid_cycles):
+                        length = len(cycle)
+                        entries = []
+                        for k in range(len(cycle)):
+                            u_n, v_n = cycle[k], cycle[(k + 1) % len(cycle)]
+                            data = G_original.get_edge_data(u_n, v_n)
+                            val = data.get(weight_col, 'N/A')
+                            entries.append(f"({u_n}→{v_n}: {val})")
+                        
+                        color_hex = mcolors.to_hex(len_to_color[length])
+                        lookup_data.append({
+                            "Cycle ID": i+1,
+                            "Length": length,
+                            "Path (Nodes)": " → ".join(map(str, cycle + [cycle[0]])),
+                            "Matrix Entries (Edges)": ", ".join(entries),
+                            "Color": color_hex
+                        })
+                    
+                    df_lookup = pd.DataFrame(lookup_data)
+                    def highlight_color(row):
+                        return [f'background-color: {row["Color"]}; color: white' if col == 'Length' else '' for col in row.index]
+
+                    st.dataframe(df_lookup.style.apply(highlight_color, axis=1))
+
             except Exception as viz_err:
                 st.error(f"Visualization Error: {viz_err}")
                 plt.close(fig_c)
