@@ -23,18 +23,17 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
     Finds cycles based on weight criteria, with optional node filtering.
     """
     def check_match(val, target):
-        if target is None: return True # If no weight selected, accept all
+        if target is None: return True 
         try:
             return np.isclose(float(val), float(target))
         except:
             return str(val) == str(target)
 
-    # 1. Identify "Target Edges" (Edges that match the weight criteria)
+    # 1. Identify "Target Edges"
     target_edges_set = set()
     for u, v, data in G.edges(data=True):
         val = data.get(weight_attr, 1)
         
-        # Check Node Connectivity (if source_node is active)
         is_connected = True
         if source_node is not None:
             if G.is_directed():
@@ -42,21 +41,16 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
             else:
                 if u != source_node and v != source_node: is_connected = False
         
-        # Check Weight Match
         if is_connected and check_match(val, target_weight):
             target_edges_set.add((u, v))
             if not G.is_directed():
                 target_edges_set.add((v, u))
 
-    # If filtering by weight and no edges match, return empty
     if target_weight is not None and not target_edges_set:
         return [], [], []
 
     # 2. Cycle Detection
-    # Note: Finding ALL cycles in large graphs is expensive. 
-    # We restrict search if a node is provided, otherwise we use cycle_basis (undirected) or simple_cycles (directed)
     if G.is_directed():
-        # simple_cycles is a generator
         cycle_gen = nx.simple_cycles(G)
     else:
         cycle_gen = nx.cycle_basis(G)
@@ -65,16 +59,13 @@ def get_cycles_general(G, target_weight=None, weight_attr='weight', source_node=
     cycle_edges_viz = set()
 
     # 3. Filter Cycles
-    # Optimization: Stop if too many cycles found to prevent freezing
     max_cycles = 5000 
     count = 0
 
     for cycle in cycle_gen:
-        # Filter: Must pass through source_node
         if source_node is not None and source_node not in cycle:
             continue
 
-        # Filter: Must contain at least one "Target Edge" (if weight filter is active)
         has_target_edge = False
         c_edges = []
         
@@ -275,7 +266,9 @@ with tab1:
                     pos = nx.spring_layout(G_original, seed=42, k=k_val, iterations=50)
 
                 is_directed = isinstance(G_original, nx.DiGraph)
-                conn_style = "arc3,rad=0.1" if is_directed else None
+                
+                # FIX: connectionstyle must be a valid string even if undirected
+                conn_style = "arc3,rad=0.1" if is_directed else "arc3,rad=0.0"
                 
                 # Draw Nodes
                 nx.draw_networkx_nodes(G_original, pos, node_size=user_node_size, node_color='lightblue', ax=ax)
@@ -292,7 +285,6 @@ with tab1:
                 if show_weights_t1:
                     edge_labels = nx.get_edge_attributes(G_original, 'weight')
                     fmt_labels = {k: (f"{v:.2f}" if isinstance(v, float) else v) for k, v in edge_labels.items()}
-                    # label_pos=0.5 places it in middle. font_size=8 makes it small.
                     nx.draw_networkx_edge_labels(G_original, pos, edge_labels=fmt_labels, 
                                                  font_size=8, label_pos=0.5, ax=ax)
                 
@@ -374,7 +366,6 @@ with tab2:
         with col_f1:
             st.subheader("1. Frobenius Matrix")
             fig_m, ax_m = plt.subplots(figsize=(8, 8))
-            # Use 'Blues' for better visibility
             ax_m.imshow(P_matrix, cmap='Blues', interpolation='none', aspect='equal')
             
             # Draw Red Cohort Boundaries
@@ -382,7 +373,7 @@ with tab2:
                 ax_m.axhline(b-0.5, color='red', linewidth=1.0)
                 ax_m.axvline(b-0.5, color='red', linewidth=1.0)
             
-            # Axis Labels (Improved Structure)
+            # Axis Labels
             ax_m.set_xticks(range(N))
             ax_m.set_yticks(range(N))
             ax_m.set_xticklabels(ordered_nodes, rotation=90, fontsize=6)
@@ -453,7 +444,7 @@ with tab3:
         else:
             weight_col = None
 
-        # Node Selection (Renamed Option)
+        # Node Selection
         use_specific_node = st.checkbox("Filter: Must pass through Node", value=True)
         all_nodes = sorted(list(G_original.nodes()), key=lambda x: (isinstance(x, str), x))
         
@@ -467,7 +458,6 @@ with tab3:
             val = data.get(weight_col, 1) if weight_col else 1
             should_add = False
             if use_specific_node:
-                # Only show values relevant to that node
                 if G_original.is_directed():
                     if u == source_u: should_add = True
                 else:
@@ -599,7 +589,6 @@ with tab3:
                             default=unique_lengths
                         )
                         
-                        # Filter cycles based on length selection
                         filtered_cycles = [c for c in valid_cycles if len(c) in selected_lengths]
                         
                         if not filtered_cycles:
@@ -610,7 +599,7 @@ with tab3:
                             cmap = plt.get_cmap('tab10')
                             len_to_color = {l: cmap(i % 10) for i, l in enumerate(unique_lengths)}
                             
-                            # 4. Build Subgraph (Union of all filtered cycles)
+                            # 4. Build Subgraph
                             filtered_edges = set()
                             for c in filtered_cycles:
                                 for k in range(len(c)):
@@ -624,7 +613,6 @@ with tab3:
                             nx.draw_networkx_nodes(G_sub, pos, node_color='lightgrey', node_size=600, edgecolors='black', ax=ax_c)
                             
                             # Draw Colored Edges
-                            # Iterate length by length to keep colors consistent
                             for length in selected_lengths:
                                 color = len_to_color[length]
                                 cycles_of_len = [c for c in filtered_cycles if len(c) == length]
